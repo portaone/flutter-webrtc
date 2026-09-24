@@ -58,6 +58,7 @@ import org.webrtc.MediaConstraints;
 import org.webrtc.MediaConstraints.KeyValuePair;
 import org.webrtc.MediaStream;
 import org.webrtc.MediaStreamTrack;
+import org.webrtc.NetworkMonitor;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnection.BundlePolicy;
 import org.webrtc.PeerConnection.CandidateNetworkPolicy;
@@ -245,6 +246,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
 
     warpEnabled = enableWARP;
+
+    // Has to be installed before PeerConnectionFactory.initialize below, because
+    // libwebrtc starts network monitoring from there and asks the factory once.
+    NetworkMonitor.getInstance().setNetworkChangeDetectorFactory(
+            new VpnAwareNetworkChangeDetectorFactory());
 
     InitializationOptions.Builder initializationOptionsBuilder =
             InitializationOptions.builder(context)
