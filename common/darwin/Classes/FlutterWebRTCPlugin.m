@@ -2207,13 +2207,29 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     urls = (NSArray*)json[@"urls"];
   }
 
+  // `tlsCertPolicy` reaches libwebrtc's own trust decision for `turns:`. That decision is
+  // made against a root list compiled into libwebrtc rather than the platform trust store,
+  // and that list carries no Let's Encrypt root - so such a deployment is refused with a
+  // fatal `unknown_ca` alert, no relay candidate appears, and nothing reports an error.
+  // Accepting the member lets a deployment opt out of the check explicitly instead of
+  // failing silently. Absent or unrecognised, verification stays on.
+  RTCTlsCertPolicy tlsCertPolicy = RTCTlsCertPolicySecure;
+  if ([json[@"tlsCertPolicy"] isKindOfClass:[NSString class]] &&
+      [json[@"tlsCertPolicy"] isEqualToString:@"insecure_no_check"]) {
+    tlsCertPolicy = RTCTlsCertPolicyInsecureNoCheck;
+  }
+
   if (json[@"username"] != nil || json[@"credential"] != nil) {
     return [[RTCIceServer alloc] initWithURLStrings:urls
                                            username:json[@"username"]
-                                         credential:json[@"credential"]];
+                                         credential:json[@"credential"]
+                                      tlsCertPolicy:tlsCertPolicy];
   }
 
-  return [[RTCIceServer alloc] initWithURLStrings:urls];
+  return [[RTCIceServer alloc] initWithURLStrings:urls
+                                         username:nil
+                                       credential:nil
+                                    tlsCertPolicy:tlsCertPolicy];
 }
 
 - (nonnull RTCConfiguration*)RTCConfiguration:(id)json {
