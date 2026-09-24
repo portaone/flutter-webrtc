@@ -1304,6 +1304,26 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     }
     result(nil);
   }
+  else if([@"setUseManualAudio" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* value = argsMap[@"value"];
+    [AudioUtils setUseManualAudio:value.boolValue];
+    result(nil);
+  }
+  else if([@"setIsAudioEnabled" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* value = argsMap[@"value"];
+    [AudioUtils setIsAudioEnabled:value.boolValue];
+    result(nil);
+  }
+  else if([@"audioSessionDidActivate" isEqualToString:call.method]) {
+    [AudioUtils audioSessionDidActivate];
+    result(nil);
+  }
+  else if([@"audioSessionDidDeactivate" isEqualToString:call.method]) {
+    [AudioUtils audioSessionDidDeactivate];
+    result(nil);
+  }
   else if([@"setAppleAudioConfiguration" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* configuration = argsMap[@"configuration"];
