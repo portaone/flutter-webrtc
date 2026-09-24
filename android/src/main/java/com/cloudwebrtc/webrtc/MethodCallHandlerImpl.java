@@ -70,6 +70,7 @@ import org.webrtc.PeerConnection.RTCConfiguration;
 import org.webrtc.PeerConnection.RtcpMuxPolicy;
 import org.webrtc.PeerConnection.SdpSemantics;
 import org.webrtc.PeerConnection.TcpCandidatePolicy;
+import org.webrtc.PeerConnection.TlsCertPolicy;
 import org.webrtc.PeerConnectionFactory;
 import org.webrtc.PeerConnectionFactory.InitializationOptions;
 import org.webrtc.PeerConnectionFactory.Options;
@@ -1304,28 +1305,13 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     List<IceServer> iceServers = new ArrayList<>(size);
     for (int i = 0; i < size; i++) {
       ConstraintsMap iceServerMap = iceServersArray.getMap(i);
-      boolean hasUsernameAndCredential =
-              iceServerMap.hasKey("username") && iceServerMap.hasKey("credential");
       if (iceServerMap.hasKey("url")) {
-        if (hasUsernameAndCredential) {
-          iceServers.add(IceServer.builder(iceServerMap.getString("url"))
-                  .setUsername(iceServerMap.getString("username"))
-                  .setPassword(iceServerMap.getString("credential")).createIceServer());
-        } else {
-          iceServers.add(
-                  IceServer.builder(iceServerMap.getString("url")).createIceServer());
-        }
+        // 'url' in the singular is non-standard, kept for the entries that still ship it.
+        iceServers.add(buildIceServer(IceServer.builder(iceServerMap.getString("url")), iceServerMap));
       } else if (iceServerMap.hasKey("urls")) {
         switch (iceServerMap.getType("urls")) {
           case String:
-            if (hasUsernameAndCredential) {
-              iceServers.add(IceServer.builder(iceServerMap.getString("urls"))
-                      .setUsername(iceServerMap.getString("username"))
-                      .setPassword(iceServerMap.getString("credential")).createIceServer());
-            } else {
-              iceServers.add(IceServer.builder(iceServerMap.getString("urls"))
-                      .createIceServer());
-            }
+            iceServers.add(buildIceServer(IceServer.builder(iceServerMap.getString("urls")), iceServerMap));
             break;
           case Array:
             ConstraintsArray urls = iceServerMap.getArray("urls");
@@ -1335,21 +1321,50 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
               urlsList.add(urls.getString(j));
             }
 
-            Builder builder = IceServer.builder(urlsList);
-
-            if (hasUsernameAndCredential) {
-              builder
-                      .setUsername(iceServerMap.getString("username"))
-                      .setPassword(iceServerMap.getString("credential"));
-            }
-
-            iceServers.add(builder.createIceServer());
+            iceServers.add(buildIceServer(IceServer.builder(urlsList), iceServerMap));
 
             break;
         }
       }
     }
     return iceServers;
+  }
+
+  /**
+   * Applies the optional members of one RTCIceServer entry and builds it.
+   *
+   * <p>Credentials are written only when BOTH are present: a TURN server registered with
+   * one half of the pair authenticates nothing and then silently relays nothing.
+   *
+   * <p>`tlsCertPolicy` reaches libwebrtc's own trust decision for `turns:`. That decision is
+   * made against a root list compiled into libwebrtc, NOT against the platform trust store,
+   * and that list carries no Let's Encrypt root - so a deployment whose TURN certificate
+   * comes from a widely used free CA is rejected with a fatal `unknown_ca` alert, no relay
+   * candidate is gathered, and nothing reports an error anywhere. Accepting the member here
+   * lets such a deployment opt out of the check explicitly rather than fail silently.
+   *
+   * <p>Absent or unrecognised, the value is left alone and libwebrtc keeps verifying.
+   */
+  private IceServer buildIceServer(Builder builder, ConstraintsMap iceServerMap) {
+    if (iceServerMap.hasKey("username") && iceServerMap.hasKey("credential")) {
+      builder
+              .setUsername(iceServerMap.getString("username"))
+              .setPassword(iceServerMap.getString("credential"));
+    }
+
+    if (iceServerMap.hasKey("tlsCertPolicy")
+            && iceServerMap.getType("tlsCertPolicy") == ObjectType.String) {
+      String tlsCertPolicy = iceServerMap.getString("tlsCertPolicy");
+      if ("insecure_no_check".equals(tlsCertPolicy)) {
+        builder.setTlsCertPolicy(TlsCertPolicy.TLS_CERT_POLICY_INSECURE_NO_CHECK);
+      } else if ("secure".equals(tlsCertPolicy)) {
+        builder.setTlsCertPolicy(TlsCertPolicy.TLS_CERT_POLICY_SECURE);
+      } else {
+        Log.w(TAG, "unknown tlsCertPolicy '" + tlsCertPolicy + "', keeping verification on");
+      }
+    }
+
+    return builder.createIceServer();
   }
 
   private RTCConfiguration parseRTCConfiguration(ConstraintsMap map) {
