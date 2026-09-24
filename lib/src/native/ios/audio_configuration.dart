@@ -169,4 +169,17 @@ class AppleNativeAudioManagement {
       await WebRTC.invokeMethod('audioSessionDidDeactivate');
     }
   }
+
+  /// Restarts the audio device module's playout and recording.
+  ///
+  /// The `AVAudioEngine` module keeps state of its own, and
+  /// [audioSessionDidActivate] does not bring it back once CallKit has
+  /// deactivated the session for a hold or an interruption: the engine has
+  /// stopped while the module still reports itself as running. Call this after
+  /// [audioSessionDidActivate]. iOS only, a no-op elsewhere.
+  static Future<void> restartAudio() async {
+    if (WebRTC.platformIsIOS) {
+      await WebRTC.invokeMethod('restartAudio', <String, dynamic>{});
+    }
+  }
 }
