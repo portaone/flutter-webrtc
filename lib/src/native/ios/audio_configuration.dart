@@ -120,4 +120,53 @@ class AppleNativeAudioManagement {
       );
     }
   }
+
+  /// Hands control of the audio session to the application.
+  ///
+  /// With manual audio on, WebRTC stops activating and deactivating
+  /// `AVAudioSession` by itself. The application then has to forward the
+  /// CallKit `CXProviderDelegate` callbacks through [audioSessionDidActivate]
+  /// and [audioSessionDidDeactivate], and gate audio with [setIsAudioEnabled].
+  /// iOS only, a no-op elsewhere.
+  static Future<void> setUseManualAudio(bool value) async {
+    if (WebRTC.platformIsIOS) {
+      await WebRTC.invokeMethod(
+        'setUseManualAudio',
+        <String, dynamic>{'value': value},
+      );
+    }
+  }
+
+  /// Whether WebRTC may run audio while manual audio is on.
+  ///
+  /// Enable it once the session is active, disable it before the session is
+  /// torn down. iOS only, a no-op elsewhere.
+  static Future<void> setIsAudioEnabled(bool value) async {
+    if (WebRTC.platformIsIOS) {
+      await WebRTC.invokeMethod(
+        'setIsAudioEnabled',
+        <String, dynamic>{'value': value},
+      );
+    }
+  }
+
+  /// Tells WebRTC the audio session has been activated.
+  ///
+  /// Call it from `provider:didActivateAudioSession:`. iOS only, a no-op
+  /// elsewhere.
+  static Future<void> audioSessionDidActivate() async {
+    if (WebRTC.platformIsIOS) {
+      await WebRTC.invokeMethod('audioSessionDidActivate');
+    }
+  }
+
+  /// Tells WebRTC the audio session is about to be deactivated.
+  ///
+  /// Call it from `provider:didDeactivateAudioSession:`. iOS only, a no-op
+  /// elsewhere.
+  static Future<void> audioSessionDidDeactivate() async {
+    if (WebRTC.platformIsIOS) {
+      await WebRTC.invokeMethod('audioSessionDidDeactivate');
+    }
+  }
 }

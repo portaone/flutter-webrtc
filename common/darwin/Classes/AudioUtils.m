@@ -147,6 +147,30 @@
   [session unlockForConfiguration];
 }
 
++ (void)setUseManualAudio:(BOOL)value {
+  RTCAudioSession* session = [RTCAudioSession sharedInstance];
+  session.useManualAudio = value;
+}
+
++ (void)setIsAudioEnabled:(BOOL)value {
+  RTCAudioSession* session = [RTCAudioSession sharedInstance];
+  session.isAudioEnabled = value;
+}
+
++ (void)audioSessionDidActivate {
+  RTCAudioSession* session = [RTCAudioSession sharedInstance];
+  // Forwarded by the application from 'provider:didActivateAudioSession:'. The
+  // delegate is handed the AVAudioSession singleton, which is what
+  // RTCAudioSession.session returns, so the session this passes on is the one
+  // CallKit activated.
+  [session audioSessionDidActivate:session.session];
+}
+
++ (void)audioSessionDidDeactivate {
+  RTCAudioSession* session = [RTCAudioSession sharedInstance];
+  // Forwarded by the application from 'provider:didDeactivateAudioSession:'.
+  [session audioSessionDidDeactivate:session.session];
+}
 
 + (AVAudioSessionMode)audioSessionModeFromString:(NSString*)mode {
   if([@"default_" isEqualToString:mode]) {
