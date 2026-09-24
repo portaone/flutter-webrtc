@@ -506,8 +506,22 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
 
     if ([videoDevice lockForConfiguration:NULL]) {
       @try {
-        videoDevice.activeVideoMaxFrameDuration = CMTimeMake(1, (int32_t)selectedFps);
-        videoDevice.activeVideoMinFrameDuration = CMTimeMake(1, (int32_t)selectedFps);
+        // selectedFps was chosen against selectedFormat, which only becomes the
+        // device's format in startCaptureWithDevice below. Until then these two
+        // setters are validated against the format still active on the device,
+        // and a rate that format cannot express raises - which is what happens
+        // on the first getUserMedia of a session, before any format was applied.
+        BOOL activeFormatAllowsFps = NO;
+        for (AVFrameRateRange* range in videoDevice.activeFormat.videoSupportedFrameRateRanges) {
+          if (selectedFps >= range.minFrameRate && selectedFps <= range.maxFrameRate) {
+            activeFormatAllowsFps = YES;
+            break;
+          }
+        }
+        if (activeFormatAllowsFps) {
+          videoDevice.activeVideoMaxFrameDuration = CMTimeMake(1, (int32_t)selectedFps);
+          videoDevice.activeVideoMinFrameDuration = CMTimeMake(1, (int32_t)selectedFps);
+        }
       } @catch (NSException* exception) {
         NSLog(@"Failed to set active frame rate!\n User info:%@", exception.userInfo);
       }
