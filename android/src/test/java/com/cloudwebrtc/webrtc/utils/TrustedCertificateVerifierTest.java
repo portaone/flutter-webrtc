@@ -137,4 +137,40 @@ public class TrustedCertificateVerifierTest {
     assertFalse(verifier.verify(new byte[0]));
     assertFalse(verifier.verify("not a certificate".getBytes(StandardCharsets.UTF_8)));
   }
+
+  /**
+   * On a plain JVM there is no system trust store to read, so a verifier exists only when the
+   * caller supplied anchors of its own - and none at all when it did not. On a device the system
+   * store is always there, which is exactly why it became the default.
+   */
+  @Test
+  public void withoutASystemStoreOnlySuppliedAnchorsBuildAVerifier() {
+    assertNull(TrustedCertificateVerifier.create(null, Arrays.asList("turn.example.com:5349")));
+
+    TrustedCertificateVerifier verifier =
+        TrustedCertificateVerifier.create(
+            Collections.singletonList(bytes(CA)), Arrays.asList("turn.example.com:5349"));
+
+    assertNotNull(verifier);
+    assertTrue(verifier.verify(bytes(LEAF)));
+  }
+
+  /**
+   * The supplied anchors are asked first. Proven by the only thing observable from outside: a
+   * verifier built from an anchor that DOES accept the leaf says yes even though the endpoint
+   * list points nowhere reachable, so nothing was waited for and nothing was learned.
+   */
+  @Test
+  public void suppliedAnchorsAnswerBeforeAnythingIsLearned() {
+    long started = System.currentTimeMillis();
+
+    TrustedCertificateVerifier verifier =
+        TrustedCertificateVerifier.create(
+            Collections.singletonList(bytes(CA)), Arrays.asList("127.0.0.1:1"));
+
+    assertNotNull(verifier);
+    assertTrue(verifier.verify(bytes(LEAF)));
+    assertTrue("a supplied anchor must not wait on the network",
+        System.currentTimeMillis() - started < 2000);
+  }
 }

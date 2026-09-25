@@ -38,6 +38,8 @@ import com.cloudwebrtc.webrtc.utils.ConstraintsArray;
 import com.cloudwebrtc.webrtc.utils.ConstraintsMap;
 import com.cloudwebrtc.webrtc.utils.EglUtils;
 import com.cloudwebrtc.webrtc.utils.ObjectType;
+import com.cloudwebrtc.webrtc.utils.TurnServerChains;
+import org.webrtc.PeerConnectionFactoryCertificateVerifier;
 import com.cloudwebrtc.webrtc.utils.TrustedCertificateVerifier;
 import com.cloudwebrtc.webrtc.utils.PermissionUtils;
 import com.cloudwebrtc.webrtc.utils.Utils;
@@ -73,7 +75,6 @@ import org.webrtc.PeerConnection.SdpSemantics;
 import org.webrtc.PeerConnection.TcpCandidatePolicy;
 import org.webrtc.PeerConnection.TlsCertPolicy;
 import org.webrtc.NetworkMonitor;
-import org.webrtc.PeerConnectionDependencies;
 import org.webrtc.PeerConnectionFactory;
 import org.webrtc.PeerConnectionFactory.InitializationOptions;
 import org.webrtc.PeerConnectionFactory.Options;
@@ -1385,6 +1386,61 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
    * its own. A verifier REPLACES that verdict, so one holding no anchor of its own would refuse
    * certificates the built-in list accepts today; doing nothing is the only safe failure.
    */
+  /**
+   * The `turns:` `host:port` pairs of this peer connection.
+   *
+   * <p>Only `turns:` entries: a plain `turn:` server presents no certificate, and `stun:` is not
+   * ours to connect to. The port is kept because a deployment may serve TLS anywhere - 443 and
+   * 5349 are both common - and the chain has to be read from the endpoint actually in use.
+   */
+  private List<String> turnsEndpoints(ConstraintsMap configuration) {
+    List<String> endpoints = new ArrayList<>();
+    if (configuration == null || !configuration.hasKey("iceServers")) {
+      return endpoints;
+    }
+
+    ConstraintsArray servers;
+    try {
+      servers = configuration.getArray("iceServers");
+    } catch (Exception e) {
+      Log.w(TAG, "could not read iceServers", e);
+      return endpoints;
+    }
+
+    for (int i = 0; i < servers.size(); i++) {
+      // Per entry: one malformed ICE server must not cost the ones after it, which are very
+      // likely the working ones - a dead entry ahead of a live one is a shape we have seen.
+      try {
+        for (String url : urlsOf(servers.getMap(i))) {
+          String endpoint = TurnServerChains.endpointOf(url);
+          if (endpoint != null && !endpoints.contains(endpoint)) {
+            endpoints.add(endpoint);
+          }
+        }
+      } catch (Exception e) {
+        Log.w(TAG, "could not read ice server #" + i + ", skipping it: " + e.getMessage());
+      }
+    }
+    return endpoints;
+  }
+
+  private List<String> urlsOf(ConstraintsMap iceServer) {
+    List<String> urls = new ArrayList<>();
+    if (iceServer.hasKey("url")) {
+      urls.add(iceServer.getString("url"));
+    } else if (iceServer.hasKey("urls")) {
+      if (iceServer.getType("urls") == ObjectType.String) {
+        urls.add(iceServer.getString("urls"));
+      } else if (iceServer.getType("urls") == ObjectType.Array) {
+        ConstraintsArray array = iceServer.getArray("urls");
+        for (int i = 0; i < array.size(); i++) {
+          urls.add(array.getString(i));
+        }
+      }
+    }
+    return urls;
+  }
+
   private List<byte[]> parseTrustedCertificates(ConstraintsMap configuration) {
     if (configuration == null) {
       return null;
@@ -1666,37 +1722,18 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     RTCConfiguration conf = parseRTCConfiguration(configuration);
     PeerConnectionObserver observer = new PeerConnectionObserver(conf, this, messenger, peerConnectionId);
 
+    // The system trust store is the default now, so a verifier is installed for every peer
+    // connection that could use one. Null only when nothing usable could be built at all, and
+    // then libwebrtc keeps deciding on its own.
     TrustedCertificateVerifier verifier =
-            TrustedCertificateVerifier.create(parseTrustedCertificates(configuration));
+            TrustedCertificateVerifier.create(
+                    parseTrustedCertificates(configuration), turnsEndpoints(configuration));
 
-    // Two creation paths on purpose. The dependencies overload is the only one that carries a
-    // certificate verifier, but it takes no media constraints, so a configuration that asked
-    // for neither keeps the exact call it has always made.
-    PeerConnection peerConnection;
-    if (verifier != null) {
-      // The dependencies overload is the only one that carries a certificate verifier, and it
-      // takes no media constraints - there is no public overload with both. Legacy constraints
-      // still reach real settings (CPU overuse detection, jitter buffer size, ICE renomination),
-      // so a caller that set them is told rather than left to find out from behaviour.
-      if (constraints != null && !constraints.toMap().isEmpty()) {
-        // The keys are named, not just counted: a caller reading this has to know WHICH
-        // settings stopped applying, and the map is the only place that says so.
-        Log.w(TAG, "trustedCertificates and media constraints were both given; the constraints "
-                + "cannot be carried on the path that installs a certificate verifier and are "
-                + "ignored for this peer connection: " + constraints.toMap().keySet());
-      }
-
-      peerConnection = mFactory.createPeerConnection(
-              conf,
-              PeerConnectionDependencies.builder(observer)
-                      .setSSLCertificateVerifier(verifier)
-                      .createPeerConnectionDependencies());
-    } else {
-      peerConnection = mFactory.createPeerConnection(
-              conf,
-              parseMediaConstraints(constraints),
-              observer);
-    }
+    // One creation path, constraints and verifier together. The public API has no overload
+    // carrying both; PeerConnectionFactoryCertificateVerifier reaches the method that does.
+    PeerConnection peerConnection =
+            PeerConnectionFactoryCertificateVerifier.createPeerConnection(
+                    mFactory, conf, parseMediaConstraints(constraints), observer, verifier);
 
     observer.setPeerConnection(peerConnection);
     mPeerConnectionObservers.put(peerConnectionId, observer);
