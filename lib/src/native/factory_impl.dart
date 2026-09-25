@@ -91,6 +91,21 @@ class RTCFactoryNative extends RTCFactory {
   }
 }
 
+/// Creates a peer connection from a W3C-shaped [configuration] map.
+///
+/// Two members beyond the W3C dictionary are read on the native side:
+///
+/// * `tlsCertPolicy` on an entry of `iceServers` - `'secure'` (the default)
+///   or `'insecure_no_check'`. The latter gives up certificate verification
+///   for that `turns:` server entirely, hostname included; it is the blunt
+///   option for a deployment whose TURN certificate cannot otherwise be
+///   trusted, not a CA-only exemption.
+/// * `trustedCertificates` at the top level, Android only - a list of
+///   `Uint8List`, each one or more DER or PEM certificates the application
+///   trusts for `turns:` servers, asked before the platform trust store. Use
+///   it for a private authority, or for an Android too old to carry the
+///   authority that issued the server's certificate. Absent, the platform
+///   store decides, under the application's network security configuration.
 Future<RTCPeerConnection> createPeerConnection(
     Map<String, dynamic> configuration,
     [Map<String, dynamic> constraints = const {}]) async {
