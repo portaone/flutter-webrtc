@@ -1679,9 +1679,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       // still reach real settings (CPU overuse detection, jitter buffer size, ICE renomination),
       // so a caller that set them is told rather than left to find out from behaviour.
       if (constraints != null && !constraints.toMap().isEmpty()) {
+        // The keys are named, not just counted: a caller reading this has to know WHICH
+        // settings stopped applying, and the map is the only place that says so.
         Log.w(TAG, "trustedCertificates and media constraints were both given; the constraints "
                 + "cannot be carried on the path that installs a certificate verifier and are "
-                + "ignored for this peer connection");
+                + "ignored for this peer connection: " + constraints.toMap().keySet());
       }
 
       peerConnection = mFactory.createPeerConnection(

@@ -42,6 +42,13 @@ android {
     }
     compileSdkVersion 36
 
+    testOptions {
+        // `TrustedCertificateVerifier` decides what to trust and is worth a unit test, but it
+        // reports through `android.util.Log`, whose stubs throw in a local JVM run unless they
+        // are told to answer instead.
+        unitTests.returnDefaultValues = true
+    }
+
     defaultConfig {
         minSdkVersion 21
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
