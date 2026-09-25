@@ -38,6 +38,9 @@ import com.cloudwebrtc.webrtc.utils.ConstraintsArray;
 import com.cloudwebrtc.webrtc.utils.ConstraintsMap;
 import com.cloudwebrtc.webrtc.utils.EglUtils;
 import com.cloudwebrtc.webrtc.utils.ObjectType;
+import com.cloudwebrtc.webrtc.utils.TurnServerChains;
+import org.webrtc.PeerConnectionFactoryCertificateVerifier;
+import com.cloudwebrtc.webrtc.utils.TrustedCertificateVerifier;
 import com.cloudwebrtc.webrtc.utils.PermissionUtils;
 import com.cloudwebrtc.webrtc.utils.Utils;
 import com.cloudwebrtc.webrtc.video.VideoCapturerInfo;
@@ -70,6 +73,8 @@ import org.webrtc.PeerConnection.RTCConfiguration;
 import org.webrtc.PeerConnection.RtcpMuxPolicy;
 import org.webrtc.PeerConnection.SdpSemantics;
 import org.webrtc.PeerConnection.TcpCandidatePolicy;
+import org.webrtc.PeerConnection.TlsCertPolicy;
+import org.webrtc.NetworkMonitor;
 import org.webrtc.PeerConnectionFactory;
 import org.webrtc.PeerConnectionFactory.InitializationOptions;
 import org.webrtc.PeerConnectionFactory.Options;
@@ -245,6 +250,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
 
     warpEnabled = enableWARP;
+
+    // Has to be installed before PeerConnectionFactory.initialize below, because
+    // libwebrtc starts network monitoring from there and asks the factory once.
+    NetworkMonitor.getInstance().setNetworkChangeDetectorFactory(
+            new VpnAwareNetworkChangeDetectorFactory());
 
     InitializationOptions.Builder initializationOptionsBuilder =
             InitializationOptions.builder(context)
@@ -1304,28 +1314,13 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     List<IceServer> iceServers = new ArrayList<>(size);
     for (int i = 0; i < size; i++) {
       ConstraintsMap iceServerMap = iceServersArray.getMap(i);
-      boolean hasUsernameAndCredential =
-              iceServerMap.hasKey("username") && iceServerMap.hasKey("credential");
       if (iceServerMap.hasKey("url")) {
-        if (hasUsernameAndCredential) {
-          iceServers.add(IceServer.builder(iceServerMap.getString("url"))
-                  .setUsername(iceServerMap.getString("username"))
-                  .setPassword(iceServerMap.getString("credential")).createIceServer());
-        } else {
-          iceServers.add(
-                  IceServer.builder(iceServerMap.getString("url")).createIceServer());
-        }
+        // 'url' in the singular is non-standard, kept for the entries that still ship it.
+        iceServers.add(buildIceServer(IceServer.builder(iceServerMap.getString("url")), iceServerMap));
       } else if (iceServerMap.hasKey("urls")) {
         switch (iceServerMap.getType("urls")) {
           case String:
-            if (hasUsernameAndCredential) {
-              iceServers.add(IceServer.builder(iceServerMap.getString("urls"))
-                      .setUsername(iceServerMap.getString("username"))
-                      .setPassword(iceServerMap.getString("credential")).createIceServer());
-            } else {
-              iceServers.add(IceServer.builder(iceServerMap.getString("urls"))
-                      .createIceServer());
-            }
+            iceServers.add(buildIceServer(IceServer.builder(iceServerMap.getString("urls")), iceServerMap));
             break;
           case Array:
             ConstraintsArray urls = iceServerMap.getArray("urls");
@@ -1335,21 +1330,144 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
               urlsList.add(urls.getString(j));
             }
 
-            Builder builder = IceServer.builder(urlsList);
-
-            if (hasUsernameAndCredential) {
-              builder
-                      .setUsername(iceServerMap.getString("username"))
-                      .setPassword(iceServerMap.getString("credential"));
-            }
-
-            iceServers.add(builder.createIceServer());
+            iceServers.add(buildIceServer(IceServer.builder(urlsList), iceServerMap));
 
             break;
         }
       }
     }
     return iceServers;
+  }
+
+  /**
+   * Applies the optional members of one RTCIceServer entry and builds it.
+   *
+   * <p>Credentials are written only when BOTH are present: a TURN server registered with
+   * one half of the pair authenticates nothing and then silently relays nothing.
+   *
+   * <p>`tlsCertPolicy` reaches libwebrtc's own trust decision for `turns:`. That decision is
+   * made against a root list compiled into libwebrtc, NOT against the platform trust store,
+   * and that list carries no Let's Encrypt root - so a deployment whose TURN certificate
+   * comes from a widely used free CA is rejected with a fatal `unknown_ca` alert, no relay
+   * candidate is gathered, and nothing reports an error anywhere. Accepting the member here
+   * lets such a deployment opt out of the check explicitly rather than fail silently.
+   *
+   * <p>Absent or unrecognised, the value is left alone and libwebrtc keeps verifying.
+   */
+  private IceServer buildIceServer(Builder builder, ConstraintsMap iceServerMap) {
+    if (iceServerMap.hasKey("username") && iceServerMap.hasKey("credential")) {
+      builder
+              .setUsername(iceServerMap.getString("username"))
+              .setPassword(iceServerMap.getString("credential"));
+    }
+
+    // Read raw rather than through getType: that throws for a value of a type it does not
+    // enumerate - a byte[] among them - which would turn one mistyped member into a failed
+    // createPeerConnection instead of an ignored key.
+    Object rawTlsCertPolicy = iceServerMap.toMap().get("tlsCertPolicy");
+    if (rawTlsCertPolicy instanceof String) {
+      String tlsCertPolicy = (String) rawTlsCertPolicy;
+      if ("insecure_no_check".equals(tlsCertPolicy)) {
+        builder.setTlsCertPolicy(TlsCertPolicy.TLS_CERT_POLICY_INSECURE_NO_CHECK);
+      } else if ("secure".equals(tlsCertPolicy)) {
+        builder.setTlsCertPolicy(TlsCertPolicy.TLS_CERT_POLICY_SECURE);
+      } else {
+        Log.w(TAG, "unknown tlsCertPolicy '" + tlsCertPolicy + "', keeping verification on");
+      }
+    }
+
+    return builder.createIceServer();
+  }
+
+  /**
+   * Certificates the application wants trusted for `turns:`, as raw DER or PEM bytes.
+   *
+   * <p>Absent, empty, or unreadable, no verifier is installed and libwebrtc keeps deciding on
+   * its own. A verifier REPLACES that verdict, so one holding no anchor of its own would refuse
+   * certificates the built-in list accepts today; doing nothing is the only safe failure.
+   */
+  /**
+   * The `turns:` `host:port` pairs of this peer connection.
+   *
+   * <p>Only `turns:` entries: a plain `turn:` server presents no certificate, and `stun:` is not
+   * ours to connect to. The port is kept because a deployment may serve TLS anywhere - 443 and
+   * 5349 are both common - and the chain has to be read from the endpoint actually in use.
+   */
+  private List<String> turnsEndpoints(ConstraintsMap configuration) {
+    List<String> endpoints = new ArrayList<>();
+    if (configuration == null || !configuration.hasKey("iceServers")) {
+      return endpoints;
+    }
+
+    ConstraintsArray servers;
+    try {
+      servers = configuration.getArray("iceServers");
+    } catch (Exception e) {
+      Log.w(TAG, "could not read iceServers", e);
+      return endpoints;
+    }
+
+    for (int i = 0; i < servers.size(); i++) {
+      // Per entry: one malformed ICE server must not cost the ones after it, which are very
+      // likely the working ones - a dead entry ahead of a live one is a shape we have seen.
+      try {
+        for (String url : urlsOf(servers.getMap(i))) {
+          String endpoint = TurnServerChains.endpointOf(url);
+          if (endpoint != null && !endpoints.contains(endpoint)) {
+            endpoints.add(endpoint);
+          }
+        }
+      } catch (Exception e) {
+        Log.w(TAG, "could not read ice server #" + i + ", skipping it: " + e.getMessage());
+      }
+    }
+    return endpoints;
+  }
+
+  private List<String> urlsOf(ConstraintsMap iceServer) {
+    List<String> urls = new ArrayList<>();
+    if (iceServer.hasKey("url")) {
+      urls.add(iceServer.getString("url"));
+    } else if (iceServer.hasKey("urls")) {
+      if (iceServer.getType("urls") == ObjectType.String) {
+        urls.add(iceServer.getString("urls"));
+      } else if (iceServer.getType("urls") == ObjectType.Array) {
+        ConstraintsArray array = iceServer.getArray("urls");
+        for (int i = 0; i < array.size(); i++) {
+          urls.add(array.getString(i));
+        }
+      }
+    }
+    return urls;
+  }
+
+  private List<byte[]> parseTrustedCertificates(ConstraintsMap configuration) {
+    if (configuration == null) {
+      return null;
+    }
+
+    // Read raw rather than through getType, which throws for a type it does not enumerate: a
+    // caller passing one Uint8List where a list of them belongs would otherwise fail the whole
+    // createPeerConnection rather than have the key ignored.
+    Object raw = configuration.toMap().get("trustedCertificates");
+    if (!(raw instanceof List)) {
+      if (raw != null) {
+        Log.w(TAG, "trustedCertificates is not a list, ignoring: " + raw.getClass());
+      }
+      return null;
+    }
+
+    List<byte[]> certificates = new ArrayList<>();
+
+    for (Object each : (List<?>) raw) {
+      if (each instanceof byte[]) {
+        certificates.add((byte[]) each);
+      } else if (each != null) {
+        Log.w(TAG, "trustedCertificates entry is not bytes, ignoring: " + each.getClass());
+      }
+    }
+
+    return certificates;
   }
 
   private RTCConfiguration parseRTCConfiguration(ConstraintsMap map) {
@@ -1603,11 +1721,20 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     String peerConnectionId = getNextStreamUUID();
     RTCConfiguration conf = parseRTCConfiguration(configuration);
     PeerConnectionObserver observer = new PeerConnectionObserver(conf, this, messenger, peerConnectionId);
-    PeerConnection peerConnection
-            = mFactory.createPeerConnection(
-            conf,
-            parseMediaConstraints(constraints),
-            observer);
+
+    // The system trust store is the default now, so a verifier is installed for every peer
+    // connection that could use one. Null only when nothing usable could be built at all, and
+    // then libwebrtc keeps deciding on its own.
+    TrustedCertificateVerifier verifier =
+            TrustedCertificateVerifier.create(
+                    parseTrustedCertificates(configuration), turnsEndpoints(configuration));
+
+    // One creation path, constraints and verifier together. The public API has no overload
+    // carrying both; PeerConnectionFactoryCertificateVerifier reaches the method that does.
+    PeerConnection peerConnection =
+            PeerConnectionFactoryCertificateVerifier.createPeerConnection(
+                    mFactory, conf, parseMediaConstraints(constraints), observer, verifier);
+
     observer.setPeerConnection(peerConnection);
     mPeerConnectionObservers.put(peerConnectionId, observer);
     return peerConnectionId;
