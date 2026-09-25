@@ -73,15 +73,23 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
 
     List<X509TrustManager> trustManagers = new ArrayList<>(2);
 
-    // Android's own store first, so a certificate that chains inside it is accepted without the
-    // application having to name the authority. It is only ever an addition: everything the
-    // supplied anchors accept is accepted either way.
+    // The supplied anchors first: they are the ones the application asked for, so the common
+    // path reaches an answer without walking through a rejection.
+    trustManagers.add(suppliedTrust);
+
+    // Android's own store after them, so a certificate that chains inside it is accepted
+    // without the application having to name the authority. It is only ever an addition.
+    //
+    // It contributes nothing in an application that ships `network_security_config.xml`,
+    // which is a common thing to ship: the platform then hands out `RootTrustManager`, and
+    // that refuses the two-argument `checkServerTrusted` outright, asking for the
+    // hostname-aware three-argument form. libwebrtc passes this verifier no hostname, so that
+    // form cannot be called. Measured on Android 16: every verification logs the refusal and
+    // falls through. Kept because it does work where no such configuration is shipped.
     X509TrustManager platform = trustManagerFor(null);
     if (platform != null) {
       trustManagers.add(platform);
     }
-
-    trustManagers.add(suppliedTrust);
 
     return new TrustedCertificateVerifier(trustManagers);
   }
@@ -116,7 +124,8 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
         trustManager.checkServerTrusted(chain, "UNKNOWN");
         return true;
       } catch (Exception e) {
-        Log.d(TAG, "anchor rejected the certificate: " + e.getMessage());
+        // One anchor declining is not the verdict - the next one is still asked.
+        Log.d(TAG, "an anchor did not accept the certificate, trying the next: " + e.getMessage());
       }
     }
 
@@ -154,19 +163,23 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
       return null;
     }
 
-    int index = 0;
+    int stored = 0;
+    int entry = 0;
     for (byte[] each : certificates) {
       try {
         for (X509Certificate certificate : parse(each)) {
-          keyStore.setCertificateEntry("supplied-" + (index++), certificate);
+          keyStore.setCertificateEntry("supplied-" + (stored++), certificate);
         }
       } catch (Exception e) {
-        // Named by position, because the bytes themselves say nothing useful in a log.
-        Log.w(TAG, "supplied certificate #" + certificates.indexOf(each) + " could not be read", e);
+        // Named by the position it was given in, because the bytes themselves say nothing
+        // useful in a log. Counted rather than searched for: `List<byte[]>.indexOf` compares
+        // references, so two entries holding one array would both report the first.
+        Log.w(TAG, "supplied certificate #" + entry + " could not be read", e);
       }
+      entry++;
     }
 
-    return index == 0 ? null : keyStore;
+    return stored == 0 ? null : keyStore;
   }
 
   private static X509TrustManager trustManagerFor(KeyStore keyStore) {
