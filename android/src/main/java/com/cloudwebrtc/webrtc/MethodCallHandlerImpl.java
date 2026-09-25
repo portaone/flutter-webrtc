@@ -38,6 +38,7 @@ import com.cloudwebrtc.webrtc.utils.ConstraintsArray;
 import com.cloudwebrtc.webrtc.utils.ConstraintsMap;
 import com.cloudwebrtc.webrtc.utils.EglUtils;
 import com.cloudwebrtc.webrtc.utils.ObjectType;
+import com.cloudwebrtc.webrtc.utils.TrustedCertificateVerifier;
 import com.cloudwebrtc.webrtc.utils.PermissionUtils;
 import com.cloudwebrtc.webrtc.utils.Utils;
 import com.cloudwebrtc.webrtc.video.VideoCapturerInfo;
@@ -72,6 +73,7 @@ import org.webrtc.PeerConnection.SdpSemantics;
 import org.webrtc.PeerConnection.TcpCandidatePolicy;
 import org.webrtc.PeerConnection.TlsCertPolicy;
 import org.webrtc.NetworkMonitor;
+import org.webrtc.PeerConnectionDependencies;
 import org.webrtc.PeerConnectionFactory;
 import org.webrtc.PeerConnectionFactory.InitializationOptions;
 import org.webrtc.PeerConnectionFactory.Options;
@@ -1358,9 +1360,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
               .setPassword(iceServerMap.getString("credential"));
     }
 
-    if (iceServerMap.hasKey("tlsCertPolicy")
-            && iceServerMap.getType("tlsCertPolicy") == ObjectType.String) {
-      String tlsCertPolicy = iceServerMap.getString("tlsCertPolicy");
+    // Read raw rather than through getType: that throws for a value of a type it does not
+    // enumerate - a byte[] among them - which would turn one mistyped member into a failed
+    // createPeerConnection instead of an ignored key.
+    Object rawTlsCertPolicy = iceServerMap.toMap().get("tlsCertPolicy");
+    if (rawTlsCertPolicy instanceof String) {
+      String tlsCertPolicy = (String) rawTlsCertPolicy;
       if ("insecure_no_check".equals(tlsCertPolicy)) {
         builder.setTlsCertPolicy(TlsCertPolicy.TLS_CERT_POLICY_INSECURE_NO_CHECK);
       } else if ("secure".equals(tlsCertPolicy)) {
@@ -1371,6 +1376,42 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
 
     return builder.createIceServer();
+  }
+
+  /**
+   * Certificates the application wants trusted for `turns:`, as raw DER or PEM bytes.
+   *
+   * <p>Absent, empty, or unreadable, no verifier is installed and libwebrtc keeps deciding on
+   * its own. A verifier REPLACES that verdict, so one holding no anchor of its own would refuse
+   * certificates the built-in list accepts today; doing nothing is the only safe failure.
+   */
+  private List<byte[]> parseTrustedCertificates(ConstraintsMap configuration) {
+    if (configuration == null) {
+      return null;
+    }
+
+    // Read raw rather than through getType, which throws for a type it does not enumerate: a
+    // caller passing one Uint8List where a list of them belongs would otherwise fail the whole
+    // createPeerConnection rather than have the key ignored.
+    Object raw = configuration.toMap().get("trustedCertificates");
+    if (!(raw instanceof List)) {
+      if (raw != null) {
+        Log.w(TAG, "trustedCertificates is not a list, ignoring: " + raw.getClass());
+      }
+      return null;
+    }
+
+    List<byte[]> certificates = new ArrayList<>();
+
+    for (Object each : (List<?>) raw) {
+      if (each instanceof byte[]) {
+        certificates.add((byte[]) each);
+      } else if (each != null) {
+        Log.w(TAG, "trustedCertificates entry is not bytes, ignoring: " + each.getClass());
+      }
+    }
+
+    return certificates;
   }
 
   private RTCConfiguration parseRTCConfiguration(ConstraintsMap map) {
@@ -1624,11 +1665,39 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     String peerConnectionId = getNextStreamUUID();
     RTCConfiguration conf = parseRTCConfiguration(configuration);
     PeerConnectionObserver observer = new PeerConnectionObserver(conf, this, messenger, peerConnectionId);
-    PeerConnection peerConnection
-            = mFactory.createPeerConnection(
-            conf,
-            parseMediaConstraints(constraints),
-            observer);
+
+    TrustedCertificateVerifier verifier =
+            TrustedCertificateVerifier.create(parseTrustedCertificates(configuration));
+
+    // Two creation paths on purpose. The dependencies overload is the only one that carries a
+    // certificate verifier, but it takes no media constraints, so a configuration that asked
+    // for neither keeps the exact call it has always made.
+    PeerConnection peerConnection;
+    if (verifier != null) {
+      // The dependencies overload is the only one that carries a certificate verifier, and it
+      // takes no media constraints - there is no public overload with both. Legacy constraints
+      // still reach real settings (CPU overuse detection, jitter buffer size, ICE renomination),
+      // so a caller that set them is told rather than left to find out from behaviour.
+      if (constraints != null && !constraints.toMap().isEmpty()) {
+        // The keys are named, not just counted: a caller reading this has to know WHICH
+        // settings stopped applying, and the map is the only place that says so.
+        Log.w(TAG, "trustedCertificates and media constraints were both given; the constraints "
+                + "cannot be carried on the path that installs a certificate verifier and are "
+                + "ignored for this peer connection: " + constraints.toMap().keySet());
+      }
+
+      peerConnection = mFactory.createPeerConnection(
+              conf,
+              PeerConnectionDependencies.builder(observer)
+                      .setSSLCertificateVerifier(verifier)
+                      .createPeerConnectionDependencies());
+    } else {
+      peerConnection = mFactory.createPeerConnection(
+              conf,
+              parseMediaConstraints(constraints),
+              observer);
+    }
+
     observer.setPeerConnection(peerConnection);
     mPeerConnectionObservers.put(peerConnectionId, observer);
     return peerConnectionId;
