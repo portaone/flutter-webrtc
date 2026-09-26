@@ -42,6 +42,12 @@ android {
     }
     compileSdkVersion 36
 
+    testOptions {
+        // The trust verifier and the chain learner are worth a unit test, and they report
+        // through android.util.Log, whose stubs throw on a plain JVM unless told to answer.
+        unitTests.returnDefaultValues = true
+    }
+
     defaultConfig {
         minSdkVersion 21
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
