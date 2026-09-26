@@ -1377,13 +1377,6 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   }
 
   /**
-   * Certificates the application wants trusted for `turns:`, as raw DER or PEM bytes.
-   *
-   * <p>Absent, empty, or unreadable, no verifier is installed and libwebrtc keeps deciding on
-   * its own. A verifier REPLACES that verdict, so one holding no anchor of its own would refuse
-   * certificates the built-in list accepts today; doing nothing is the only safe failure.
-   */
-  /**
    * The `host:port` of every `turns:` server of this peer connection whose certificate is meant
    * to be verified.
    *
@@ -1433,9 +1426,8 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
   /** Whether this ICE server asked for its certificate not to be checked at all. */
   private boolean givesUpVerification(ConstraintsMap iceServer) {
-    return iceServer.hasKey("tlsCertPolicy")
-            && iceServer.getType("tlsCertPolicy") == ObjectType.String
-            && "insecure_no_check".equals(iceServer.getString("tlsCertPolicy"));
+    // Match buildIceServer: an unsupported type keeps verification on, including byte[].
+    return "insecure_no_check".equals(iceServer.toMap().get("tlsCertPolicy"));
   }
 
   private List<String> urlsOf(ConstraintsMap iceServer) {
@@ -2168,7 +2160,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   /**
    * Applies a new configuration to a live peer connection, and to its certificate verifier.
    *
-   * <p>Order matters. The new trust is prepared but NOT published before the native call, and the
+   * <p>Order matters. The new inputs are parsed but NOT published before the native call, and the
    * native call is made without holding anything the verifier's callback might need - it can run
    * on a signalling thread while this is in flight. Only once libwebrtc has accepted the
    * configuration does the verifier switch to it, as one immutable snapshot; a rejected update
