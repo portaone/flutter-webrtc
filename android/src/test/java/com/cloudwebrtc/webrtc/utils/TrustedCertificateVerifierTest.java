@@ -250,21 +250,55 @@ public class TrustedCertificateVerifierTest {
       try (LocalTlsServer healthy = LocalTlsServer.answering()) {
         endpoints.add(healthy.endpoint());
 
-        FakePolicy policy = new FakePolicy("localhost");
         TrustedCertificateVerifier verifier =
-                TrustedCertificateVerifier.withPolicy(null, endpoints, policy);
+                TrustedCertificateVerifier.withPolicy(null, endpoints, (chain, host) -> {
+                  // Force the missing-chain path, rather than accepting on the initial check.
+                  if (chain.length < 2) throw new java.security.cert.CertificateException();
+                });
 
         long started = System.nanoTime();
         boolean accepted = verifier.verify(bytes(TestPki.LEAF));
         long elapsedMs = (System.nanoTime() - started) / 1000000L;
 
-        assertTrue("the policy still decides", accepted);
+        assertFalse("no intermediate arrived within the budget", accepted);
         assertTrue("one verification, one budget: " + elapsedMs + " ms", elapsedMs < 3200);
       }
     } finally {
       for (LocalTlsServer stall : stalls) {
         stall.close();
       }
+    }
+  }
+
+  @Test
+  public void platformAcceptanceDoesNotWaitForASecondHandshake() throws Exception {
+    try (LocalTlsServer stalled = LocalTlsServer.stalling(8000)) {
+      TrustedCertificateVerifier verifier = TrustedCertificateVerifier.withPolicy(null,
+              Collections.singletonList(stalled.endpoint()), new FakePolicy("localhost"));
+      assertTrue(verifier.verify(bytes(TestPki.LEAF)));
+      assertEquals("existing trust needs no network lookup", 0, stalled.connections());
+    }
+  }
+
+  @Test
+  public void enrichmentRechecksTheWholeHostPolicyIntersection() throws Exception {
+    javax.net.ssl.SSLContext previous = javax.net.ssl.SSLContext.getDefault();
+    javax.net.ssl.SSLContext.setDefault(LocalTlsServer.trustingTheAuthority());
+    try (LocalTlsServer server = LocalTlsServer.answering()) {
+      java.util.List<String> asked = new java.util.ArrayList<>();
+      TrustedCertificateVerifier verifier = TrustedCertificateVerifier.withPolicy(null,
+              Arrays.asList(server.endpoint(), "127.0.0.1:1"), (chain, host) -> {
+                asked.add(host + ":" + chain.length);
+                if ((chain.length == 1 && host.equals("127.0.0.1"))
+                        || (chain.length > 1 && host.equals("localhost"))) {
+                  throw new java.security.cert.CertificateException("policy refuses this chain");
+                }
+              });
+      assertFalse("decisions from different chain attempts must not be combined",
+              verifier.verify(bytes(TestPki.LEAF)));
+      assertEquals(Arrays.asList("localhost:1", "127.0.0.1:1", "localhost:2"), asked);
+    } finally {
+      javax.net.ssl.SSLContext.setDefault(previous);
     }
   }
 

@@ -11,6 +11,7 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -225,16 +226,26 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
       return false;
     }
 
-    // One deadline for the whole verification, spread across the hosts it has to ask about.
+    // Platform intermediate caches, a direct root, or a completed warm-up may already suffice.
+    // Cache-only reads must not start a second connection just to confirm an existing answer.
+    X509Certificate[] available = withIntermediates(
+            chain, learnedFor(snapshot.secureEndpoints, hosts, System.nanoTime()));
+    if (acceptedByEveryHost(available, hosts)) {
+      return true;
+    }
+
+    // One deadline for missing chain material, spread across all covered endpoints.
     long deadline = System.nanoTime() + VERIFY_WAIT_NS;
     X509Certificate[] full = withIntermediates(
             chain, learnedFor(snapshot.secureEndpoints, hosts, deadline));
+    return !Arrays.equals(available, full) && acceptedByEveryHost(full, hosts);
+  }
 
-    // EVERY covered host must accept. No falling through to another host after a refusal: that
-    // would be choosing a security policy by trying them until one says yes.
+  private boolean acceptedByEveryHost(X509Certificate[] chain, List<String> hosts) {
+    // Recheck the whole intersection after enrichment; never carry one host's verdict forward.
     for (String host : hosts) {
       try {
-        platform.check(full, host);
+        platform.check(chain, host);
       } catch (Exception refusal) {
         Log.w(TAG, "the policy for " + host + " refuses the certificate: " + refusal.getMessage());
         return false;
