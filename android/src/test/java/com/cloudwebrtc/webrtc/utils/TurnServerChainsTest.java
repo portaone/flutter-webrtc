@@ -9,6 +9,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -110,6 +113,8 @@ public class TurnServerChainsTest {
 
       assertTrue("nothing left to spend means nothing is spent",
               System.nanoTime() - started < ms(300));
+      Thread.sleep(50);
+      assertEquals("a cache-only read cannot create speculative work", 0, stall.connections());
     }
   }
 
@@ -228,5 +233,39 @@ public class TurnServerChainsTest {
   @Test
   public void survivesAnUnreachableEndpoint() {
     assertTrue(TurnServerChains.intermediatesFor("127.0.0.1:1", ms(1500)).isEmpty());
+  }
+
+  @Test
+  public void aShortCallerBudgetDoesNotPreventAFullBudgetRetry() throws Exception {
+    try (LocalTlsServer server = LocalTlsServer.answering(300)) {
+      assertTrue(TurnServerChains.intermediatesFor(server.endpoint(), ms(80)).isEmpty());
+      assertEquals(1, TurnServerChains.intermediatesFor(server.endpoint(), ms(2500)).size());
+      assertEquals("both attempts reached the server", 2, server.connections());
+    }
+  }
+
+  @Test
+  public void partialTlsRecordsCannotExtendTheAbsoluteDeadline() throws Exception {
+    try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+      Thread drip = new Thread(() -> {
+        try (Socket client = server.accept()) {
+          // Announce a 4096-byte handshake record, then keep each individual read alive.
+          client.getOutputStream().write(new byte[]{22, 3, 3, 16, 0});
+          for (int i = 0; i < 100; i++) {
+            client.getOutputStream().write(0);
+            client.getOutputStream().flush();
+            Thread.sleep(20);
+          }
+        } catch (Exception closed) {
+          // The client's absolute deadline closes the connection during the record.
+        }
+      });
+      drip.setDaemon(true);
+      drip.start();
+      long began = System.nanoTime();
+      assertTrue(TurnServerChains.intermediatesFor("localhost:" + server.getLocalPort(), ms(200)).isEmpty());
+      assertTrue("partial reads must not renew the budget", System.nanoTime() - began < ms(1000));
+      drip.join(1000);
+    }
   }
 }

@@ -38,14 +38,17 @@ final class LocalTlsServer implements AutoCloseable {
 
   private final ServerSocket socket;
   private final Thread thread;
+  private final java.util.concurrent.atomic.AtomicReference<Socket> active;
   private final java.util.concurrent.atomic.AtomicInteger accepted;
 
   private LocalTlsServer(ServerSocket socket,
                          java.util.concurrent.atomic.AtomicInteger accepted,
-                         Thread thread) {
+                         Thread thread,
+                         java.util.concurrent.atomic.AtomicReference<Socket> active) {
     this.socket = socket;
     this.accepted = accepted;
     this.thread = thread;
+    this.active = active;
   }
 
   /**
@@ -82,6 +85,11 @@ final class LocalTlsServer implements AutoCloseable {
 
   /** Completes handshakes, presenting the generated leaf and the authority above it. */
   static LocalTlsServer answering() throws Exception {
+    return answering(0);
+  }
+
+  /** Delays only the first handshake, allowing a timed-out client to retry successfully. */
+  static LocalTlsServer answering(final long firstDelayMs) throws Exception {
     generate();
 
     KeyStore keys = KeyStore.getInstance("PKCS12");
@@ -101,20 +109,28 @@ final class LocalTlsServer implements AutoCloseable {
 
     final java.util.concurrent.atomic.AtomicInteger counted =
             new java.util.concurrent.atomic.AtomicInteger();
+    final java.util.concurrent.atomic.AtomicReference<Socket> active =
+            new java.util.concurrent.atomic.AtomicReference<>();
     return new LocalTlsServer(server, counted, started(new Runnable() {
       @Override
       public void run() {
         while (!server.isClosed()) {
           try (Socket client = server.accept()) {
-            counted.incrementAndGet();
+            active.set(client);
+            if (server.isClosed()) return;
+            if (counted.incrementAndGet() == 1 && firstDelayMs > 0) {
+              Thread.sleep(firstDelayMs);
+            }
             // One read is enough to drive the handshake to completion.
             client.getInputStream().read();
           } catch (Exception stop) {
-            return;
+            if (server.isClosed() || stop instanceof InterruptedException) return;
+          } finally {
+            active.set(null);
           }
         }
       }
-    }));
+    }), active);
   }
 
   /** Accepts and then holds the connection without speaking TLS, for as long as it is told. */
@@ -122,19 +138,25 @@ final class LocalTlsServer implements AutoCloseable {
     final ServerSocket server = new ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"));
     final java.util.concurrent.atomic.AtomicInteger counted =
             new java.util.concurrent.atomic.AtomicInteger();
+    final java.util.concurrent.atomic.AtomicReference<Socket> active =
+            new java.util.concurrent.atomic.AtomicReference<>();
     return new LocalTlsServer(server, counted, started(new Runnable() {
       @Override
       public void run() {
         while (!server.isClosed()) {
           try (Socket client = server.accept()) {
+            active.set(client);
+            if (server.isClosed()) return;
             counted.incrementAndGet();
             Thread.sleep(holdMs);
           } catch (Exception stop) {
-            return;
+            if (server.isClosed() || stop instanceof InterruptedException) return;
+          } finally {
+            active.set(null);
           }
         }
       }
-    }));
+    }), active);
   }
 
   /** `host:port` in the shape {@link TurnServerChains#endpointOf} produces. */
@@ -145,7 +167,10 @@ final class LocalTlsServer implements AutoCloseable {
   @Override
   public void close() throws Exception {
     socket.close();
+    Socket client = active.get();
+    if (client != null) client.close();
     thread.interrupt();
+    thread.join(1000);
   }
 
   private static void generate() throws Exception {
