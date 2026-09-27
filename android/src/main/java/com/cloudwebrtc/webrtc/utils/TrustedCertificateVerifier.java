@@ -95,9 +95,24 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
     final X509TrustManager supplied;
     final List<String> secureEndpoints;
 
-    Trust(X509TrustManager supplied, List<String> secureEndpoints) {
+    /**
+     * The `turns:` servers configured with `insecure_no_check`. Never consulted for a verdict -
+     * they contribute no host and no policy - only so that a certificate for one of them is
+     * logged as what it is rather than as a refusal.
+     */
+    final List<String> unverifiedEndpoints;
+
+    Trust(X509TrustManager supplied, List<String> secureEndpoints,
+          List<String> unverifiedEndpoints) {
       this.supplied = supplied;
-      this.secureEndpoints = Collections.unmodifiableList(new ArrayList<>(secureEndpoints));
+      this.secureEndpoints = listOf(secureEndpoints);
+      this.unverifiedEndpoints = listOf(unverifiedEndpoints);
+    }
+
+    private static List<String> listOf(List<String> endpoints) {
+      return endpoints == null
+              ? Collections.<String>emptyList()
+              : Collections.unmodifiableList(new ArrayList<>(endpoints));
     }
   }
 
@@ -126,9 +141,16 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
   /** For tests: the same verifier with a policy whose answers the test controls. */
   static TrustedCertificateVerifier withPolicy(
           List<byte[]> trustedCertificates, List<String> secureEndpoints, HostTrustPolicy platform) {
+    return withPolicy(trustedCertificates, secureEndpoints, null, platform);
+  }
+
+  /** For tests: as above, with `turns:` servers that gave verification up. */
+  static TrustedCertificateVerifier withPolicy(
+          List<byte[]> trustedCertificates, List<String> secureEndpoints,
+          List<String> unverifiedEndpoints, HostTrustPolicy platform) {
     return new TrustedCertificateVerifier(
-            new Trust(suppliedTrustManager(trustedCertificates),
-                    secureEndpoints == null ? Collections.<String>emptyList() : secureEndpoints),
+            new Trust(suppliedTrustManager(trustedCertificates), secureEndpoints,
+                    unverifiedEndpoints),
             platform);
   }
 
@@ -151,6 +173,20 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
    */
   public static TrustedCertificateVerifier create(
           List<byte[]> trustedCertificates, List<String> secureEndpoints) {
+    return create(trustedCertificates, secureEndpoints, null);
+  }
+
+  /**
+   * As {@link #create(List, List)}, also told which `turns:` servers gave verification up.
+   *
+   * @param unverifiedEndpoints `host:port` of the `turns:` servers configured with
+   *     `insecure_no_check`. libwebrtc still hands their certificates to the verifier, and acts on
+   *     neither answer; knowing them only lets such a certificate be logged as unverified by
+   *     request instead of as a refusal. They take no part in any verdict.
+   */
+  public static TrustedCertificateVerifier create(
+          List<byte[]> trustedCertificates, List<String> secureEndpoints,
+          List<String> unverifiedEndpoints) {
     X509TrustManager supplied = suppliedTrustManager(trustedCertificates);
     HostTrustPolicy platform = platformPolicy();
     if (supplied == null && platform == null) {
@@ -159,8 +195,7 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
     }
 
     TrustedCertificateVerifier verifier = new TrustedCertificateVerifier(
-            new Trust(supplied, secureEndpoints == null
-                    ? Collections.<String>emptyList() : secureEndpoints), platform);
+            new Trust(supplied, secureEndpoints, unverifiedEndpoints), platform);
     TurnServerChains.warm(verifier.trust.secureEndpoints);
     return verifier;
   }
@@ -173,9 +208,14 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
    * it granted, which is why the whole snapshot is replaced rather than added to.
    */
   public void reconfigure(List<byte[]> trustedCertificates, List<String> secureEndpoints) {
+    reconfigure(trustedCertificates, secureEndpoints, null);
+  }
+
+  /** As {@link #reconfigure(List, List)}, with the `turns:` servers that gave verification up. */
+  public void reconfigure(List<byte[]> trustedCertificates, List<String> secureEndpoints,
+                          List<String> unverifiedEndpoints) {
     Trust replacement = new Trust(
-            suppliedTrustManager(trustedCertificates),
-            secureEndpoints == null ? Collections.<String>emptyList() : secureEndpoints);
+            suppliedTrustManager(trustedCertificates), secureEndpoints, unverifiedEndpoints);
     this.trust = replacement;
     TurnServerChains.warm(replacement.secureEndpoints);
   }
@@ -209,6 +249,14 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
 
     List<String> hosts = coveredHosts(chain[0], snapshot.secureEndpoints);
     if (hosts.isEmpty()) {
+      if (!coveredHosts(chain[0], snapshot.unverifiedEndpoints).isEmpty()) {
+        // A server configured with `insecure_no_check`. libwebrtc asks anyway and then ignores
+        // the answer, so a warning here would describe a refusal that never happens: the
+        // connection succeeds. The verdict itself is unchanged.
+        Log.d(TAG, "not verified, by request: the certificate is for a turns: server "
+                + "configured with insecure_no_check");
+        return false;
+      }
       Log.w(TAG, "the certificate covers none of the configured turns: hosts, refusing");
       return false;
     }

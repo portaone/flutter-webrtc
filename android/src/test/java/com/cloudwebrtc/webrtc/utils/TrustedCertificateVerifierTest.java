@@ -303,6 +303,41 @@ public class TrustedCertificateVerifierTest {
   }
 
   /**
+   * A server configured with `insecure_no_check` is known to the verifier only for its log.
+   *
+   * <p>libwebrtc still hands over its certificate, and ignores the answer. Knowing the server
+   * changes how that is logged, and must change nothing else: the answer stays no, and no policy
+   * is consulted on its behalf.
+   */
+  @Test
+  public void aServerThatGaveVerificationUpDecidesNothing() {
+    FakePolicy policy = new FakePolicy("localhost");
+    TrustedCertificateVerifier verifier = TrustedCertificateVerifier.withPolicy(
+            null,
+            Collections.<String>emptyList(),
+            Collections.singletonList("localhost:5349"),
+            policy);
+
+    assertFalse(verifier.verify(bytes(TestPki.LEAF)));
+    assertTrue("no policy is asked for a server nobody verifies", policy.asked.isEmpty());
+  }
+
+  /** Nor does it take a verified server out of the check when one certificate covers both. */
+  @Test
+  public void aServerThatGaveVerificationUpDoesNotExemptItsNeighbour() {
+    FakePolicy policy = new FakePolicy("a.example.test");
+    TrustedCertificateVerifier verifier = TrustedCertificateVerifier.withPolicy(
+            null,
+            Collections.singletonList("a.example.test:5349"),
+            Collections.singletonList("b.example.test:5349"),
+            policy);
+
+    assertTrue(verifier.verify(bytes(TestPki.MULTI)));
+    assertEquals("only the verified host is asked", Collections.singletonList("a.example.test"),
+            policy.asked);
+  }
+
+  /**
    * Fail closed. With no policy and no supplied anchor there is nothing to decide with, and the
    * answer must be no - not a silent fall-through to the library's own, different trust list.
    */

@@ -1393,9 +1393,25 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
    * <p>An entry that asked for `insecure_no_check` is left OUT. Nothing about it is verified, so
    * letting it contribute a host would mean its trust policy could decide for a server that IS
    * verified - and letting it contribute an endpoint would spend a handshake learning a chain
-   * nobody will check.
+   * nobody will check. Those are what {@link #unverifiedTurnsEndpoints} returns.
    */
   private List<String> turnsEndpoints(ConstraintsMap configuration) {
+    return turnsEndpointsWhere(configuration, false);
+  }
+
+  /**
+   * The `host:port` of every `turns:` server of this peer connection that asked for
+   * `insecure_no_check` - the complement of {@link #turnsEndpoints}.
+   *
+   * <p>Only for the verifier's log: libwebrtc still hands it their certificates and ignores the
+   * answer, and knowing them lets that be logged as unverified by request instead of as a
+   * refusal. They never take part in a verdict.
+   */
+  private List<String> unverifiedTurnsEndpoints(ConstraintsMap configuration) {
+    return turnsEndpointsWhere(configuration, true);
+  }
+
+  private List<String> turnsEndpointsWhere(ConstraintsMap configuration, boolean gaveUp) {
     List<String> endpoints = new ArrayList<>();
     if (configuration == null || !configuration.hasKey("iceServers")) {
       return endpoints;
@@ -1414,7 +1430,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       // likely the working ones - a dead entry ahead of a live one is a shape we have seen.
       try {
         ConstraintsMap server = servers.getMap(i);
-        if (givesUpVerification(server)) {
+        if (givesUpVerification(server) != gaveUp) {
           continue;
         }
         for (String url : urlsOf(server)) {
@@ -1739,7 +1755,8 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     // then libwebrtc keeps deciding on its own.
     TrustedCertificateVerifier verifier =
             TrustedCertificateVerifier.create(
-                    parseTrustedCertificates(configuration), turnsEndpoints(configuration));
+                    parseTrustedCertificates(configuration), turnsEndpoints(configuration),
+                    unverifiedTurnsEndpoints(configuration));
     // Kept with the observer, not just handed to libwebrtc: `setConfiguration` can change the
     // servers and the certificates, and the verifier has to be told - see peerConnectionSetConfiguration.
     observer.setCertificateVerifier(verifier);
@@ -2184,6 +2201,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
     List<byte[]> trustedCertificates = parseTrustedCertificates(configuration);
     List<String> secureEndpoints = turnsEndpoints(configuration);
+    List<String> unverifiedEndpoints = unverifiedTurnsEndpoints(configuration);
 
     if (!peerConnection.setConfiguration(parseRTCConfiguration(configuration))) {
       Log.w(TAG, "setConfiguration was rejected; trust is left as it was");
@@ -2192,7 +2210,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
     TrustedCertificateVerifier verifier = observer.getCertificateVerifier();
     if (verifier != null) {
-      verifier.reconfigure(trustedCertificates, secureEndpoints);
+      verifier.reconfigure(trustedCertificates, secureEndpoints, unverifiedEndpoints);
     } else if (!secureEndpoints.isEmpty() || trustedCertificates != null) {
       // Nothing to reconfigure: no verifier was installed when this peer connection was built,
       // and libwebrtc takes one only at creation. Said out loud because the `turns:` servers
