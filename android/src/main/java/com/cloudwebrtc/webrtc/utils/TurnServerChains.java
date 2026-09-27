@@ -23,6 +23,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
@@ -51,7 +52,15 @@ public final class TurnServerChains {
           RESOLVE_TIMEOUT_MS + CONNECT_TIMEOUT_MS + READ_TIMEOUT_MS);
 
   private static final ThreadPoolExecutor LEARNERS = pool("turn-chain-warm", 2, 16);
-  private static final ThreadPoolExecutor RESOLVERS = pool("turn-chain-dns", 2, 16);
+  // Package-private so a test can occupy it the way a hung platform resolver would.
+  static final ThreadPoolExecutor RESOLVERS = pool("turn-chain-dns", 2, 16);
+
+  /**
+   * How late a resolution may start and still count as having had its allowance: a thread
+   * handoff, or waking an idle worker, not a queue.
+   */
+  private static final long RESOLVER_SLACK_NS = TimeUnit.MILLISECONDS.toNanos(50);
+  private static final long NOT_STARTED = Long.MIN_VALUE;
   private static final ScheduledThreadPoolExecutor DEADLINES =
           new ScheduledThreadPoolExecutor(1, threads("turn-chain-deadline"));
   private static final TurnServerChainCache CACHE = new TurnServerChainCache(
@@ -132,12 +141,38 @@ public final class TurnServerChains {
     return pool;
   }
 
+  /**
+   * A resolution that timed out without having had its allowance: it waited for a worker, or
+   * never got one.
+   *
+   * <p>That says nothing about the host. The pool is shared, and a platform resolver that ignores
+   * interruption holds its worker for as long as the lookup it was given, so two stuck names can
+   * starve every other one.
+   */
+  private static final class ResolverBusy extends Exception {
+    ResolverBusy(String host) {
+      super("no resolver was free in time for " + host);
+    }
+  }
+
   private static InetAddress resolve(String host, int timeoutMs)
-          throws InterruptedException, ExecutionException, TimeoutException {
-    FutureTask<InetAddress> lookup = new FutureTask<>(() -> InetAddress.getByName(host));
+          throws InterruptedException, ExecutionException, TimeoutException, ResolverBusy {
+    AtomicLong began = new AtomicLong(NOT_STARTED);
+    FutureTask<InetAddress> lookup = new FutureTask<>(() -> {
+      began.set(System.nanoTime());
+      return InetAddress.getByName(host);
+    });
+    long submitted = System.nanoTime();
     RESOLVERS.execute(lookup);
     try {
       return lookup.get(timeoutMs, TimeUnit.MILLISECONDS);
+    } catch (TimeoutException slow) {
+      // Only a resolver that started promptly and then did not answer speaks for the host.
+      long start = began.get();
+      if (start == NOT_STARTED || start - submitted > RESOLVER_SLACK_NS) {
+        throw new ResolverBusy(host);
+      }
+      throw slow;
     } finally {
       // Native DNS may ignore interruption, but cannot grow beyond the fixed resolver pool.
       lookup.cancel(true);
@@ -212,6 +247,9 @@ public final class TurnServerChains {
       Thread.currentThread().interrupt();
       return Result.RETRY;
     } catch (RejectedExecutionException busy) {
+      return Result.RETRY;
+    } catch (ResolverBusy busy) {
+      Log.w(TAG, busy.getMessage() + ", leaving " + endpoint + " for a later attempt");
       return Result.RETRY;
     } catch (Exception failure) {
       Log.w(TAG, "could not learn the chain from " + endpoint + ": " + failure.getMessage());

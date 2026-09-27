@@ -8,6 +8,7 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.net.InetAddress;
 import java.net.ServerSocket;
@@ -223,6 +224,52 @@ public class TurnServerChainsTest {
       for (LocalTlsServer stall : stalls) {
         stall.close();
       }
+    }
+  }
+
+  /**
+   * Waiting for a resolver is waiting, not a verdict about the host.
+   *
+   * <p>The pool is shared and small, and a platform resolver that ignores interruption keeps its
+   * worker. Two such lookups held both workers here, so a healthy endpoint timed out waiting for
+   * one with its own allowance untouched - and was cached as a failed endpoint for a minute:
+   * measured, a full budget afterwards reached the server zero times while the same certificate
+   * on a fresh port was learned at once. The workers are occupied directly, the way a hung
+   * resolution would hold them.
+   */
+  @Test
+  public void aBusyResolverPoolIsNotAVerdictAboutTheHost() throws Exception {
+    final CountDownLatch release = new CountDownLatch(1);
+    final CountDownLatch holding = new CountDownLatch(2);
+    for (int i = 0; i < 2; i++) {
+      TurnServerChains.RESOLVERS.execute(() -> {
+        holding.countDown();
+        try {
+          release.await(10, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+          // A hung native lookup would not return early either.
+        }
+      });
+    }
+
+    try (LocalTlsServer healthy = LocalTlsServer.answering()) {
+      try {
+        assertTrue("both resolver workers are held", holding.await(2, TimeUnit.SECONDS));
+        assertTrue("nothing can be learned while no resolver is free",
+                TurnServerChains.intermediatesFor(healthy.endpoint(), ms(3000)).isEmpty());
+        assertEquals("and the server is not reached", 0, healthy.connections());
+      } finally {
+        release.countDown();
+      }
+
+      long giveUpAt = System.nanoTime() + ms(5000);
+      while (TurnServerChains.RESOLVERS.getActiveCount() > 0 && System.nanoTime() < giveUpAt) {
+        Thread.sleep(20);
+      }
+
+      assertEquals("once a resolver is free the endpoint must be tried again", 1,
+              TurnServerChains.intermediatesFor(healthy.endpoint(), ms(3000)).size());
+      assertEquals(1, healthy.connections());
     }
   }
 
