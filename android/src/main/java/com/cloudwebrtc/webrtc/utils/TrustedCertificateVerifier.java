@@ -230,7 +230,9 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
     // Cache-only reads must not start a second connection just to confirm an existing answer.
     X509Certificate[] available = withIntermediates(
             chain, learnedFor(snapshot.secureEndpoints, hosts, System.nanoTime()));
-    if (acceptedByEveryHost(available, hosts)) {
+    String refusal = refusalByAnyHost(available, hosts);
+    if (refusal == null) {
+      Log.i(TAG, "accepted by the policy of every covered host: " + hosts);
       return true;
     }
 
@@ -238,22 +240,40 @@ public class TrustedCertificateVerifier implements SSLCertificateVerifier {
     long deadline = System.nanoTime() + VERIFY_WAIT_NS;
     X509Certificate[] full = withIntermediates(
             chain, learnedFor(snapshot.secureEndpoints, hosts, deadline));
-    return !Arrays.equals(available, full) && acceptedByEveryHost(full, hosts);
+    if (Arrays.equals(available, full)) {
+      // Nothing new to decide with, so the first answer is the verdict.
+      Log.w(TAG, refusal);
+      return false;
+    }
+
+    // Not a verdict yet: the ordinary cold-cache case, where a bare leaf cannot be chained until
+    // the intermediates arrive. Logged as a warning it would read as the failure it is not.
+    Log.d(TAG, "not enough with the chain at hand (" + refusal + "), asking again");
+    refusal = refusalByAnyHost(full, hosts);
+    if (refusal != null) {
+      Log.w(TAG, refusal);
+      return false;
+    }
+    Log.i(TAG, "accepted by the policy of every covered host: " + hosts);
+    return true;
   }
 
-  private boolean acceptedByEveryHost(X509Certificate[] chain, List<String> hosts) {
-    // Recheck the whole intersection after enrichment; never carry one host's verdict forward.
+  /**
+   * Why the first covered host to refuse does so, or null when every one accepts.
+   *
+   * <p>The whole intersection is asked on every call; one host's verdict is never carried over
+   * from a chain that was different. The caller decides whether a refusal is final, and so
+   * whether it is worth a warning.
+   */
+  private String refusalByAnyHost(X509Certificate[] chain, List<String> hosts) {
     for (String host : hosts) {
       try {
         platform.check(chain, host);
-      } catch (Exception refusal) {
-        Log.w(TAG, "the policy for " + host + " refuses the certificate: " + refusal.getMessage());
-        return false;
+      } catch (Exception refused) {
+        return "the policy for " + host + " refuses the certificate: " + refused.getMessage();
       }
     }
-
-    Log.i(TAG, "accepted by the policy of every covered host: " + hosts);
-    return true;
+    return null;
   }
 
   /** The configured hosts this certificate is issued for, each named once however many ports. */

@@ -197,6 +197,7 @@ public final class TurnServerChains {
       int port = Integer.parseInt(endpoint.substring(endpoint.lastIndexOf(':') + 1));
       int resolveMs = budgetMs(deadline, RESOLVE_TIMEOUT_MS);
       if (resolveMs == 0) {
+        Log.d(TAG, "out of time before resolving " + host);
         return Result.RETRY;
       }
       shortened = resolveMs < RESOLVE_TIMEOUT_MS;
@@ -204,6 +205,7 @@ public final class TurnServerChains {
 
       int connectMs = budgetMs(deadline, CONNECT_TIMEOUT_MS);
       if (connectMs == 0) {
+        Log.d(TAG, "out of time before connecting to " + endpoint);
         return Result.RETRY;
       }
       shortened |= connectMs < CONNECT_TIMEOUT_MS;
@@ -215,6 +217,7 @@ public final class TurnServerChains {
 
       int readMs = budgetMs(deadline, READ_TIMEOUT_MS);
       if (readMs == 0) {
+        Log.d(TAG, "out of time before the handshake with " + endpoint);
         return Result.RETRY;
       }
       shortened |= readMs < READ_TIMEOUT_MS;
@@ -230,9 +233,14 @@ public final class TurnServerChains {
         }
         tls.startHandshake();
         Certificate[] presented = tls.getSession().getPeerCertificates();
-        if (presented.length == 0 || !(presented[0] instanceof X509Certificate)
-                || (!platformChecksHost
-                    && !CertificateIdentity.covers((X509Certificate) presented[0], host))) {
+        if (presented.length == 0 || !(presented[0] instanceof X509Certificate)) {
+          Log.w(TAG, "no X.509 leaf from " + endpoint);
+          return Result.FAILURE;
+        }
+        if (!platformChecksHost
+                && !CertificateIdentity.covers((X509Certificate) presented[0], host)) {
+          // Below API 24 the handshake validated the chain but not the name.
+          Log.w(TAG, "the certificate from " + endpoint + " does not name " + host);
           return Result.FAILURE;
         }
         List<X509Certificate> intermediates = new ArrayList<>(presented.length - 1);
@@ -241,12 +249,14 @@ public final class TurnServerChains {
             intermediates.add((X509Certificate) presented[i]);
           }
         }
+        Log.i(TAG, "learned " + intermediates.size() + " intermediate(s) from " + endpoint);
         return Result.learned(intermediates);
       }
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
       return Result.RETRY;
     } catch (RejectedExecutionException busy) {
+      Log.w(TAG, "resolver queue is full, leaving " + endpoint + " for a later attempt");
       return Result.RETRY;
     } catch (ResolverBusy busy) {
       Log.w(TAG, busy.getMessage() + ", leaving " + endpoint + " for a later attempt");
