@@ -9,6 +9,10 @@
 + (void)setSpeakerphoneOn:(BOOL)enable;
 + (void)setSpeakerphoneOnButPreferBluetooth;
 + (void)deactiveRtcAudioSession;
++ (void)setUseManualAudio:(BOOL)value;
++ (void)setIsAudioEnabled:(BOOL)value;
++ (void)audioSessionDidActivate;
++ (void)audioSessionDidDeactivate;
 + (void) setAppleAudioConfiguration:(NSDictionary*)configuration;
 @end
 

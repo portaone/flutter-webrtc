@@ -22,10 +22,10 @@
       if (session.category != AVAudioSessionCategoryPlayAndRecord &&
           session.category != AVAudioSessionCategoryMultiRoute) {
         config.category = AVAudioSessionCategoryPlayAndRecord;
-        config.categoryOptions =
-            AVAudioSessionCategoryOptionAllowBluetooth |
-            AVAudioSessionCategoryOptionAllowBluetoothA2DP |
-            AVAudioSessionCategoryOptionAllowAirPlay;
+        // AllowBluetooth is HFP, the two-way profile. A2DP and AirPlay are
+        // output-only: once the session settles on either of them the microphone
+        // has no route and the call goes one-way.
+        config.categoryOptions = AVAudioSessionCategoryOptionAllowBluetooth;
         success = [session setCategory:config.category withOptions:config.categoryOptions error:&error];
         if (!success)
           NSLog(@"ensureAudioSessionWithRecording[true]: setCategory failed due to: %@", error);
@@ -79,11 +79,14 @@
   [session lockForConfiguration];
   NSError* error = nil;
   if (!enable) {
+    // PlayAndRecord explicitly: the earpiece is asked for while the session may
+    // still be in a playback-only category, and the microphone has to survive
+    // the switch.
+    config.category = AVAudioSessionCategoryPlayAndRecord;
+    config.categoryOptions = AVAudioSessionCategoryOptionAllowBluetooth;
     [session setMode:config.mode error:&error];
     BOOL success = [session setCategory:config.category
-                            withOptions:AVAudioSessionCategoryOptionAllowAirPlay |
-                                        AVAudioSessionCategoryOptionAllowBluetoothA2DP |
-                                        AVAudioSessionCategoryOptionAllowBluetooth
+                            withOptions:config.categoryOptions
                                   error:&error];
 
     success = [session.session overrideOutputAudioPort:kAudioSessionOverrideAudioRoute_None
@@ -91,12 +94,12 @@
     if (!success)
       NSLog(@"setSpeakerphoneOn: Port override failed due to: %@", error);
   } else {
+    config.category = AVAudioSessionCategoryPlayAndRecord;
+    config.categoryOptions = AVAudioSessionCategoryOptionDefaultToSpeaker |
+                             AVAudioSessionCategoryOptionAllowBluetooth;
     [session setMode:config.mode error:&error];
     BOOL success = [session setCategory:config.category
-                            withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker |
-                                        AVAudioSessionCategoryOptionAllowAirPlay |
-                                        AVAudioSessionCategoryOptionAllowBluetoothA2DP |
-                                        AVAudioSessionCategoryOptionAllowBluetooth
+                            withOptions:config.categoryOptions
                                   error:&error];
 
     success = [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker
@@ -147,6 +150,30 @@
   [session unlockForConfiguration];
 }
 
++ (void)setUseManualAudio:(BOOL)value {
+  RTCAudioSession* session = [RTCAudioSession sharedInstance];
+  session.useManualAudio = value;
+}
+
++ (void)setIsAudioEnabled:(BOOL)value {
+  RTCAudioSession* session = [RTCAudioSession sharedInstance];
+  session.isAudioEnabled = value;
+}
+
++ (void)audioSessionDidActivate {
+  RTCAudioSession* session = [RTCAudioSession sharedInstance];
+  // Forwarded by the application from 'provider:didActivateAudioSession:'. The
+  // delegate is handed the AVAudioSession singleton, which is what
+  // RTCAudioSession.session returns, so the session this passes on is the one
+  // CallKit activated.
+  [session audioSessionDidActivate:session.session];
+}
+
++ (void)audioSessionDidDeactivate {
+  RTCAudioSession* session = [RTCAudioSession sharedInstance];
+  // Forwarded by the application from 'provider:didDeactivateAudioSession:'.
+  [session audioSessionDidDeactivate:session.session];
+}
 
 + (AVAudioSessionMode)audioSessionModeFromString:(NSString*)mode {
   if([@"default_" isEqualToString:mode]) {

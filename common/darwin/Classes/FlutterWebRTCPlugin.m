@@ -1304,6 +1304,26 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     }
     result(nil);
   }
+  else if([@"setUseManualAudio" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* value = argsMap[@"value"];
+    [AudioUtils setUseManualAudio:value.boolValue];
+    result(nil);
+  }
+  else if([@"setIsAudioEnabled" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* value = argsMap[@"value"];
+    [AudioUtils setIsAudioEnabled:value.boolValue];
+    result(nil);
+  }
+  else if([@"audioSessionDidActivate" isEqualToString:call.method]) {
+    [AudioUtils audioSessionDidActivate];
+    result(nil);
+  }
+  else if([@"audioSessionDidDeactivate" isEqualToString:call.method]) {
+    [AudioUtils audioSessionDidDeactivate];
+    result(nil);
+  }
   else if([@"setAppleAudioConfiguration" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* configuration = argsMap[@"configuration"];
@@ -1814,6 +1834,43 @@ static void FlutterWebRTCApplyFieldTrials(void) {
                                                 details:nil]);
                 }
 #endif
+    } else if ([@"restartAudio" isEqualToString:call.method]) {
+      // Restarts the AVAudioEngine ADM, typically after hold/unhold or audio session interruption.
+      // RTCAudioSession.isAudioEnabled / audioSessionDidActivate only control the legacy CoreAudio AudioUnit ADM.
+      // RTCAudioDeviceModuleTypeAudioEngine requires direct ADM start calls to resume both playout and recording.
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      if (adm == nil) {
+        // Every call below would answer zero on nil, which reads as a restart
+        // that worked, so refuse here instead of reporting a silent success.
+        result([FlutterError errorWithCode:@"restartAudio failed"
+                                  message:@"no audio device module: initialize the plugin first"
+                                  details:nil]);
+        return;
+      }
+      dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        // Explicitly stop before restart to clear ADM internal state.
+        // When AVAudioSession is deactivated by CallKit, AVAudioEngine stops via
+        // AVAudioSessionInterruptionNotification while ADM internal state still reports
+        // running. initAndStartRecording would then short-circuit ("already started")
+        // and return 0 without actually restarting the engine.
+        [adm stopPlayout];
+        [adm stopRecording];
+        NSInteger recordResult = [adm initAndStartRecording];
+        NSInteger playResult = [adm startPlayout];
+        // startPlayout returns -1 when playout is already running (not an error).
+        BOOL success = (recordResult == 0) && (playResult == 0 || playResult == -1);
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (success) {
+            result(nil);
+          } else {
+            result([FlutterError
+                errorWithCode:@"restartAudio failed"
+                      message:[NSString stringWithFormat:@"record=%ld play=%ld",
+                                                         (long)recordResult, (long)playResult]
+                      details:nil]);
+          }
+        });
+      });
     } else if ([@"startLocalRecording" isEqualToString:call.method]) {
       RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
       // Run on background queue
@@ -2150,13 +2207,29 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     urls = (NSArray*)json[@"urls"];
   }
 
+  // `tlsCertPolicy` reaches libwebrtc's own trust decision for `turns:`. That decision is
+  // made against a root list compiled into libwebrtc rather than the platform trust store,
+  // and that list carries no Let's Encrypt root - so such a deployment is refused with a
+  // fatal `unknown_ca` alert, no relay candidate appears, and nothing reports an error.
+  // Accepting the member lets a deployment opt out of the check explicitly instead of
+  // failing silently. Absent or unrecognised, verification stays on.
+  RTCTlsCertPolicy tlsCertPolicy = RTCTlsCertPolicySecure;
+  if ([json[@"tlsCertPolicy"] isKindOfClass:[NSString class]] &&
+      [json[@"tlsCertPolicy"] isEqualToString:@"insecure_no_check"]) {
+    tlsCertPolicy = RTCTlsCertPolicyInsecureNoCheck;
+  }
+
   if (json[@"username"] != nil || json[@"credential"] != nil) {
     return [[RTCIceServer alloc] initWithURLStrings:urls
                                            username:json[@"username"]
-                                         credential:json[@"credential"]];
+                                         credential:json[@"credential"]
+                                      tlsCertPolicy:tlsCertPolicy];
   }
 
-  return [[RTCIceServer alloc] initWithURLStrings:urls];
+  return [[RTCIceServer alloc] initWithURLStrings:urls
+                                         username:nil
+                                       credential:nil
+                                    tlsCertPolicy:tlsCertPolicy];
 }
 
 - (nonnull RTCConfiguration*)RTCConfiguration:(id)json {

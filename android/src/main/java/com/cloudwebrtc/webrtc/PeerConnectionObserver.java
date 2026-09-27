@@ -8,6 +8,7 @@ import com.cloudwebrtc.webrtc.audio.AudioSwitchManager;
 import com.cloudwebrtc.webrtc.utils.AnyThreadSink;
 import com.cloudwebrtc.webrtc.utils.ConstraintsArray;
 import com.cloudwebrtc.webrtc.utils.ConstraintsMap;
+import com.cloudwebrtc.webrtc.utils.TrustedCertificateVerifier;
 import com.cloudwebrtc.webrtc.utils.Utils;
 
 import io.flutter.plugin.common.BinaryMessenger;
@@ -93,6 +94,24 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
   public PeerConnection getPeerConnection() {
     return peerConnection;
+  }
+
+  /**
+   * The certificate verifier installed on this peer connection, or null when none was.
+   *
+   * <p>Held here because it outlives the call that created it: `setConfiguration` can change the
+   * `turns:` servers and the supplied certificates, and the verifier libwebrtc holds a reference
+   * to has to learn about that. Without this the verifier would keep deciding from the
+   * configuration the peer connection was born with.
+   */
+  private TrustedCertificateVerifier certificateVerifier;
+
+  void setCertificateVerifier(TrustedCertificateVerifier certificateVerifier) {
+    this.certificateVerifier = certificateVerifier;
+  }
+
+  TrustedCertificateVerifier getCertificateVerifier() {
+    return certificateVerifier;
   }
 
   void setPeerConnection(PeerConnection peerConnection) {
