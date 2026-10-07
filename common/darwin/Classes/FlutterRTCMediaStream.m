@@ -778,7 +778,16 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
     if ([port.UID isEqualToString:deviceId]) {
       if (self.preferredInput != port.portType) {
         self.preferredInput = port.portType;
-        [AudioUtils selectAudioInput:self.preferredInput];
+        AVAudioSessionPort preferredInput = self.preferredInput;
+        // Off the main thread and in order with the other session calls; answered when done.
+        dispatch_async([AudioUtils sessionQueue], ^{
+          [AudioUtils selectAudioInput:preferredInput];
+          dispatch_async(dispatch_get_main_queue(), ^{
+            if (result)
+              result(nil);
+          });
+        });
+        return;
       }
       break;
     }
@@ -810,28 +819,27 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
     return;
   }
 
-  RTCAudioSession* session = [RTCAudioSession sharedInstance];
-  NSError* setCategoryError = nil;
-
-  if ([deviceId isEqualToString:@"Speaker"]) {
-    [session.session overrideOutputAudioPort:kAudioSessionOverrideAudioRoute_Speaker
+  // The port override waits for the route like the other session changes: same queue.
+  BOOL speaker = [deviceId isEqualToString:@"Speaker"];
+  dispatch_async([AudioUtils sessionQueue], ^{
+    RTCAudioSession* session = [RTCAudioSession sharedInstance];
+    NSError* setCategoryError = nil;
+    [session.session overrideOutputAudioPort:speaker ? kAudioSessionOverrideAudioRoute_Speaker
+                                                     : kAudioSessionOverrideAudioRoute_None
                                        error:&setCategoryError];
-  } else {
-    [session.session overrideOutputAudioPort:kAudioSessionOverrideAudioRoute_None
-                                       error:&setCategoryError];
-  }
-
-  if (setCategoryError == nil) {
-    result(nil);
-    return;
-  }
-
-  result([FlutterError
-      errorWithCode:@"selectAudioOutputFailed"
-            message:[NSString
-                        stringWithFormat:@"Error: %@", [setCategoryError localizedFailureReason]]
-            details:nil]);
-
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (setCategoryError == nil) {
+        result(nil);
+        return;
+      }
+      result([FlutterError
+          errorWithCode:@"selectAudioOutputFailed"
+                message:[NSString stringWithFormat:@"Error: %@",
+                                                   [setCategoryError localizedFailureReason]]
+                details:nil]);
+    });
+  });
+  return;
 #endif
   result([FlutterError errorWithCode:@"selectAudioOutputFailed"
                              message:[NSString stringWithFormat:@"Error: deviceId not found!"]

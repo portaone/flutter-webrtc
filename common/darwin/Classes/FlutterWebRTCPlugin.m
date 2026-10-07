@@ -1287,8 +1287,17 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     _speakerOn = enable.boolValue;
     _speakerOnButPreferBluetooth = NO;
     if (self.audioSessionManagementEnabled) {
-      [AudioUtils setSpeakerphoneOn:_speakerOn];
-      postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+      // The session answers only after the route has moved; done on the main thread that freezes
+      // the UI for the whole switch. The reply is sent once the switch is done, as before.
+      BOOL speakerOn = _speakerOn;
+      dispatch_async([AudioUtils sessionQueue], ^{
+        [AudioUtils setSpeakerphoneOn:speakerOn];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+          result(nil);
+        });
+      });
+      return;
     }
     result(nil);
   }
@@ -1300,7 +1309,13 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     _speakerOn = YES;
     _speakerOnButPreferBluetooth = YES;
     if (self.audioSessionManagementEnabled) {
-      [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+      dispatch_async([AudioUtils sessionQueue], ^{
+        [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          result(nil);
+        });
+      });
+      return;
     }
     result(nil);
   }
@@ -1328,7 +1343,15 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* configuration = argsMap[@"configuration"];
     if (self.audioSessionManagementEnabled) {
-      [AudioUtils setAppleAudioConfiguration:configuration];
+      // A mode or category change re-routes too; same queue, so it keeps its order with the
+      // speakerphone calls around it.
+      dispatch_async([AudioUtils sessionQueue], ^{
+        [AudioUtils setAppleAudioConfiguration:configuration];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          result(nil);
+        });
+      });
+      return;
     }
     result(nil);
   }
@@ -2018,7 +2041,12 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   if (!self.audioSessionManagementEnabled) {
     return;
   }
-  [AudioUtils ensureAudioSessionWithRecording:[self hasLocalAudioTrack]];
+  // Its callers go on to use the session, so it stays synchronous; through the queue it runs
+  // after a change that was asked for earlier and is still under way.
+  BOOL recording = [self hasLocalAudioTrack];
+  dispatch_sync([AudioUtils sessionQueue], ^{
+    [AudioUtils ensureAudioSessionWithRecording:recording];
+  });
 #endif
 }
 
@@ -2040,7 +2068,11 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     return;
   }
   if (![self hasLocalAudioTrack] && ![self hasOpenPeerConnection]) {
-    [AudioUtils deactiveRtcAudioSession];
+    // After any change still queued: one applied to a session already deactivated would be lost
+    // or would configure the next call's session too late.
+    dispatch_sync([AudioUtils sessionQueue], ^{
+      [AudioUtils deactiveRtcAudioSession];
+    });
   }
 #endif
 }
