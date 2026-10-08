@@ -506,8 +506,22 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
 
     if ([videoDevice lockForConfiguration:NULL]) {
       @try {
-        videoDevice.activeVideoMaxFrameDuration = CMTimeMake(1, (int32_t)selectedFps);
-        videoDevice.activeVideoMinFrameDuration = CMTimeMake(1, (int32_t)selectedFps);
+        // selectedFps was chosen against selectedFormat, which only becomes the
+        // device's format in startCaptureWithDevice below. Until then these two
+        // setters are validated against the format still active on the device,
+        // and a rate that format cannot express raises - which is what happens
+        // on the first getUserMedia of a session, before any format was applied.
+        BOOL activeFormatAllowsFps = NO;
+        for (AVFrameRateRange* range in videoDevice.activeFormat.videoSupportedFrameRateRanges) {
+          if (selectedFps >= range.minFrameRate && selectedFps <= range.maxFrameRate) {
+            activeFormatAllowsFps = YES;
+            break;
+          }
+        }
+        if (activeFormatAllowsFps) {
+          videoDevice.activeVideoMaxFrameDuration = CMTimeMake(1, (int32_t)selectedFps);
+          videoDevice.activeVideoMinFrameDuration = CMTimeMake(1, (int32_t)selectedFps);
+        }
       } @catch (NSException* exception) {
         NSLog(@"Failed to set active frame rate!\n User info:%@", exception.userInfo);
       }
@@ -693,35 +707,33 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
     }];
   }
 #if TARGET_OS_IPHONE
-
-  RTCAudioSession* session = [RTCAudioSession sharedInstance];
-  for (AVAudioSessionPortDescription* port in session.session.availableInputs) {
-    // NSLog(@"input portName: %@, type %@", port.portName,port.portType);
-    [sources addObject:@{
-      @"deviceId" : port.UID,
-      @"label" : port.portName,
-      @"groupId" : port.portType,
-      @"kind" : @"audioinput",
-    }];
-  }
-
-  for (AVAudioSessionPortDescription* port in session.currentRoute.outputs) {
-    // NSLog(@"output portName: %@, type %@", port.portName,port.portType);
-    if (session.currentRoute.outputs.count == 1 && ![port.UID isEqualToString:@"Speaker"]) {
+  // The session answers a read of its inputs and its route only after a change that is under way
+  // has finished - for a Bluetooth headset that is more than a second. Read on the session queue:
+  // the main thread stays free, and the answer is the route after every change asked for so far.
+  dispatch_async([AudioUtils sessionQueue], ^{
+    RTCAudioSession* session = [RTCAudioSession sharedInstance];
+    for (AVAudioSessionPortDescription* port in session.session.availableInputs) {
       [sources addObject:@{
-        @"deviceId" : @"Speaker",
-        @"label" : @"Speaker",
-        @"groupId" : @"Speaker",
+        @"deviceId" : port.UID,
+        @"label" : port.portName,
+        @"groupId" : port.portType,
+        @"kind" : @"audioinput",
+      }];
+    }
+
+    for (AVAudioSessionPortDescription* port in session.currentRoute.outputs) {
+      [sources addObject:@{
+        @"deviceId" : port.UID,
+        @"label" : port.portName,
+        @"groupId" : port.portType,
         @"kind" : @"audiooutput",
       }];
     }
-    [sources addObject:@{
-      @"deviceId" : port.UID,
-      @"label" : port.portName,
-      @"groupId" : port.portType,
-      @"kind" : @"audiooutput",
-    }];
-  }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      result(@{@"sources" : sources});
+    });
+  });
+  return;
 #endif
 #if TARGET_OS_OSX
   RTCAudioDeviceModule* audioDeviceModule = [self.peerConnectionFactory audioDeviceModule];
@@ -770,11 +782,19 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   RTCAudioSession* session = [RTCAudioSession sharedInstance];
   for (AVAudioSessionPortDescription* port in session.session.availableInputs) {
     if ([port.UID isEqualToString:deviceId]) {
-      if (self.preferredInput != port.portType) {
-        self.preferredInput = port.portType;
-        [AudioUtils selectAudioInput:self.preferredInput];
-      }
-      break;
+      // Asked of the session every time: the input it uses moves without this method, so the one
+      // set here last says nothing about the one in use now.
+      self.preferredInput = port.portType;
+      AVAudioSessionPort preferredInput = self.preferredInput;
+      // Off the main thread and in order with the other session calls; answered when done.
+      dispatch_async([AudioUtils sessionQueue], ^{
+        [AudioUtils selectAudioInput:preferredInput];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (result)
+            result(nil);
+        });
+      });
+      return;
     }
   }
   if (result)
@@ -804,28 +824,27 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
     return;
   }
 
-  RTCAudioSession* session = [RTCAudioSession sharedInstance];
-  NSError* setCategoryError = nil;
-
-  if ([deviceId isEqualToString:@"Speaker"]) {
-    [session.session overrideOutputAudioPort:kAudioSessionOverrideAudioRoute_Speaker
+  // The port override waits for the route like the other session changes: same queue.
+  BOOL speaker = [deviceId isEqualToString:@"Speaker"];
+  dispatch_async([AudioUtils sessionQueue], ^{
+    RTCAudioSession* session = [RTCAudioSession sharedInstance];
+    NSError* setCategoryError = nil;
+    [session.session overrideOutputAudioPort:speaker ? kAudioSessionOverrideAudioRoute_Speaker
+                                                     : kAudioSessionOverrideAudioRoute_None
                                        error:&setCategoryError];
-  } else {
-    [session.session overrideOutputAudioPort:kAudioSessionOverrideAudioRoute_None
-                                       error:&setCategoryError];
-  }
-
-  if (setCategoryError == nil) {
-    result(nil);
-    return;
-  }
-
-  result([FlutterError
-      errorWithCode:@"selectAudioOutputFailed"
-            message:[NSString
-                        stringWithFormat:@"Error: %@", [setCategoryError localizedFailureReason]]
-            details:nil]);
-
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (setCategoryError == nil) {
+        result(nil);
+        return;
+      }
+      result([FlutterError
+          errorWithCode:@"selectAudioOutputFailed"
+                message:[NSString stringWithFormat:@"Error: %@",
+                                                   [setCategoryError localizedFailureReason]]
+                details:nil]);
+    });
+  });
+  return;
 #endif
   result([FlutterError errorWithCode:@"selectAudioOutputFailed"
                              message:[NSString stringWithFormat:@"Error: deviceId not found!"]

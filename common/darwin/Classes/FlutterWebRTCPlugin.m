@@ -1287,8 +1287,17 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     _speakerOn = enable.boolValue;
     _speakerOnButPreferBluetooth = NO;
     if (self.audioSessionManagementEnabled) {
-      [AudioUtils setSpeakerphoneOn:_speakerOn];
-      postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+      // The session answers only after the route has moved; done on the main thread that freezes
+      // the UI for the whole switch. The reply is sent once the switch is done, as before.
+      BOOL speakerOn = _speakerOn;
+      dispatch_async([AudioUtils sessionQueue], ^{
+        [AudioUtils setSpeakerphoneOn:speakerOn];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+          result(nil);
+        });
+      });
+      return;
     }
     result(nil);
   }
@@ -1300,15 +1309,71 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     _speakerOn = YES;
     _speakerOnButPreferBluetooth = YES;
     if (self.audioSessionManagementEnabled) {
-      [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+      dispatch_async([AudioUtils sessionQueue], ^{
+        [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          result(nil);
+        });
+      });
+      return;
     }
     result(nil);
+  }
+  else if([@"setUseManualAudio" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* value = argsMap[@"value"];
+    BOOL manual = value.boolValue;
+    // In order with the route changes: one that was asked for first has to be applied first.
+    dispatch_async([AudioUtils sessionQueue], ^{
+      [AudioUtils setUseManualAudio:manual];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(nil);
+      });
+    });
+  }
+  else if([@"setIsAudioEnabled" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* value = argsMap[@"value"];
+    BOOL enabled = value.boolValue;
+    // In order with the route changes: one that was asked for first has to be applied first.
+    dispatch_async([AudioUtils sessionQueue], ^{
+      [AudioUtils setIsAudioEnabled:enabled];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(nil);
+      });
+    });
+  }
+  else if([@"audioSessionDidActivate" isEqualToString:call.method]) {
+    // In order with the route changes: one that was asked for first has to be applied first.
+    dispatch_async([AudioUtils sessionQueue], ^{
+      [AudioUtils audioSessionDidActivate];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(nil);
+      });
+    });
+  }
+  else if([@"audioSessionDidDeactivate" isEqualToString:call.method]) {
+    // In order with the route changes: one that was asked for first has to be applied first.
+    dispatch_async([AudioUtils sessionQueue], ^{
+      [AudioUtils audioSessionDidDeactivate];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(nil);
+      });
+    });
   }
   else if([@"setAppleAudioConfiguration" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* configuration = argsMap[@"configuration"];
     if (self.audioSessionManagementEnabled) {
-      [AudioUtils setAppleAudioConfiguration:configuration];
+      // A mode or category change re-routes too; same queue, so it keeps its order with the
+      // speakerphone calls around it.
+      dispatch_async([AudioUtils sessionQueue], ^{
+        [AudioUtils setAppleAudioConfiguration:configuration];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          result(nil);
+        });
+      });
+      return;
     }
     result(nil);
   }
@@ -1814,6 +1879,43 @@ static void FlutterWebRTCApplyFieldTrials(void) {
                                                 details:nil]);
                 }
 #endif
+    } else if ([@"restartAudio" isEqualToString:call.method]) {
+      // Restarts the AVAudioEngine ADM, typically after hold/unhold or audio session interruption.
+      // RTCAudioSession.isAudioEnabled / audioSessionDidActivate only control the legacy CoreAudio AudioUnit ADM.
+      // RTCAudioDeviceModuleTypeAudioEngine requires direct ADM start calls to resume both playout and recording.
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      if (adm == nil) {
+        // Every call below would answer zero on nil, which reads as a restart
+        // that worked, so refuse here instead of reporting a silent success.
+        result([FlutterError errorWithCode:@"restartAudio failed"
+                                  message:@"no audio device module: initialize the plugin first"
+                                  details:nil]);
+        return;
+      }
+      dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        // Explicitly stop before restart to clear ADM internal state.
+        // When AVAudioSession is deactivated by CallKit, AVAudioEngine stops via
+        // AVAudioSessionInterruptionNotification while ADM internal state still reports
+        // running. initAndStartRecording would then short-circuit ("already started")
+        // and return 0 without actually restarting the engine.
+        [adm stopPlayout];
+        [adm stopRecording];
+        NSInteger recordResult = [adm initAndStartRecording];
+        NSInteger playResult = [adm startPlayout];
+        // startPlayout returns -1 when playout is already running (not an error).
+        BOOL success = (recordResult == 0) && (playResult == 0 || playResult == -1);
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (success) {
+            result(nil);
+          } else {
+            result([FlutterError
+                errorWithCode:@"restartAudio failed"
+                      message:[NSString stringWithFormat:@"record=%ld play=%ld",
+                                                         (long)recordResult, (long)playResult]
+                      details:nil]);
+          }
+        });
+      });
     } else if ([@"startLocalRecording" isEqualToString:call.method]) {
       RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
       // Run on background queue
@@ -1961,7 +2063,12 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   if (!self.audioSessionManagementEnabled) {
     return;
   }
-  [AudioUtils ensureAudioSessionWithRecording:[self hasLocalAudioTrack]];
+  // Its callers go on to use the session, so it stays synchronous; through the queue it runs
+  // after a change that was asked for earlier and is still under way.
+  BOOL recording = [self hasLocalAudioTrack];
+  dispatch_sync([AudioUtils sessionQueue], ^{
+    [AudioUtils ensureAudioSessionWithRecording:recording];
+  });
 #endif
 }
 
@@ -1983,7 +2090,11 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     return;
   }
   if (![self hasLocalAudioTrack] && ![self hasOpenPeerConnection]) {
-    [AudioUtils deactiveRtcAudioSession];
+    // After any change still queued: one applied to a session already deactivated would be lost
+    // or would configure the next call's session too late.
+    dispatch_sync([AudioUtils sessionQueue], ^{
+      [AudioUtils deactiveRtcAudioSession];
+    });
   }
 #endif
 }
@@ -2150,13 +2261,29 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     urls = (NSArray*)json[@"urls"];
   }
 
+  // `tlsCertPolicy` reaches libwebrtc's own trust decision for `turns:`. That decision is
+  // made against a root list compiled into libwebrtc rather than the platform trust store,
+  // and that list carries no Let's Encrypt root - so such a deployment is refused with a
+  // fatal `unknown_ca` alert, no relay candidate appears, and nothing reports an error.
+  // Accepting the member lets a deployment opt out of the check explicitly instead of
+  // failing silently. Absent or unrecognised, verification stays on.
+  RTCTlsCertPolicy tlsCertPolicy = RTCTlsCertPolicySecure;
+  if ([json[@"tlsCertPolicy"] isKindOfClass:[NSString class]] &&
+      [json[@"tlsCertPolicy"] isEqualToString:@"insecure_no_check"]) {
+    tlsCertPolicy = RTCTlsCertPolicyInsecureNoCheck;
+  }
+
   if (json[@"username"] != nil || json[@"credential"] != nil) {
     return [[RTCIceServer alloc] initWithURLStrings:urls
                                            username:json[@"username"]
-                                         credential:json[@"credential"]];
+                                         credential:json[@"credential"]
+                                      tlsCertPolicy:tlsCertPolicy];
   }
 
-  return [[RTCIceServer alloc] initWithURLStrings:urls];
+  return [[RTCIceServer alloc] initWithURLStrings:urls
+                                         username:nil
+                                       credential:nil
+                                    tlsCertPolicy:tlsCertPolicy];
 }
 
 - (nonnull RTCConfiguration*)RTCConfiguration:(id)json {
