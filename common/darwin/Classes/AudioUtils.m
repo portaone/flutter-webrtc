@@ -4,6 +4,15 @@
 
 @implementation AudioUtils
 
++ (dispatch_queue_t)sessionQueue {
+  static dispatch_queue_t queue;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    queue = dispatch_queue_create("flutter_webrtc.audio_session", DISPATCH_QUEUE_SERIAL);
+  });
+  return queue;
+}
+
 + (void)ensureAudioSessionWithRecording:(BOOL)recording {
   RTCAudioSession* session = [RTCAudioSession sharedInstance];
   // we also need to set default WebRTC audio configuration, since it may be activated after
