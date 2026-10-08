@@ -4,7 +4,8 @@
 
 @interface AudioUtils : NSObject
 // Serial queue every change of the audio session goes through, so the changes take effect in
-// the order they were asked for. AVAudioSession answers a category, mode or port change only
+// the order they were asked for - the CallKit activation callbacks an application forwards
+// included. AVAudioSession answers a category, mode or port change only
 // after the system has moved the route, which takes hundreds of milliseconds - too long for the
 // main thread, where the method channel delivers them - so those are dispatched asynchronously.
 // A caller that needs the session settled before it goes on enters with dispatch_sync; nothing

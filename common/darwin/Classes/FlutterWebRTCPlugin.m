@@ -1322,22 +1322,44 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   else if([@"setUseManualAudio" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSNumber* value = argsMap[@"value"];
-    [AudioUtils setUseManualAudio:value.boolValue];
-    result(nil);
+    BOOL manual = value.boolValue;
+    // In order with the route changes: one that was asked for first has to be applied first.
+    dispatch_async([AudioUtils sessionQueue], ^{
+      [AudioUtils setUseManualAudio:manual];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(nil);
+      });
+    });
   }
   else if([@"setIsAudioEnabled" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSNumber* value = argsMap[@"value"];
-    [AudioUtils setIsAudioEnabled:value.boolValue];
-    result(nil);
+    BOOL enabled = value.boolValue;
+    // In order with the route changes: one that was asked for first has to be applied first.
+    dispatch_async([AudioUtils sessionQueue], ^{
+      [AudioUtils setIsAudioEnabled:enabled];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(nil);
+      });
+    });
   }
   else if([@"audioSessionDidActivate" isEqualToString:call.method]) {
-    [AudioUtils audioSessionDidActivate];
-    result(nil);
+    // In order with the route changes: one that was asked for first has to be applied first.
+    dispatch_async([AudioUtils sessionQueue], ^{
+      [AudioUtils audioSessionDidActivate];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(nil);
+      });
+    });
   }
   else if([@"audioSessionDidDeactivate" isEqualToString:call.method]) {
-    [AudioUtils audioSessionDidDeactivate];
-    result(nil);
+    // In order with the route changes: one that was asked for first has to be applied first.
+    dispatch_async([AudioUtils sessionQueue], ^{
+      [AudioUtils audioSessionDidDeactivate];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(nil);
+      });
+    });
   }
   else if([@"setAppleAudioConfiguration" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
