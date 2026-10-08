@@ -782,20 +782,19 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   RTCAudioSession* session = [RTCAudioSession sharedInstance];
   for (AVAudioSessionPortDescription* port in session.session.availableInputs) {
     if ([port.UID isEqualToString:deviceId]) {
-      if (self.preferredInput != port.portType) {
-        self.preferredInput = port.portType;
-        AVAudioSessionPort preferredInput = self.preferredInput;
-        // Off the main thread and in order with the other session calls; answered when done.
-        dispatch_async([AudioUtils sessionQueue], ^{
-          [AudioUtils selectAudioInput:preferredInput];
-          dispatch_async(dispatch_get_main_queue(), ^{
-            if (result)
-              result(nil);
-          });
+      // Asked of the session every time: the input it uses moves without this method, so the one
+      // set here last says nothing about the one in use now.
+      self.preferredInput = port.portType;
+      AVAudioSessionPort preferredInput = self.preferredInput;
+      // Off the main thread and in order with the other session calls; answered when done.
+      dispatch_async([AudioUtils sessionQueue], ^{
+        [AudioUtils selectAudioInput:preferredInput];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (result)
+            result(nil);
         });
-        return;
-      }
-      break;
+      });
+      return;
     }
   }
   if (result)
